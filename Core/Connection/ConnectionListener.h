@@ -6,16 +6,19 @@
 #define RELAY_CONNECTIONLISTENER_H
 
 #include <boost/asio/ip/tcp.hpp>
+#include "ConnectionMap.h"
 
 class ConnectionListener {
 public:
-    explicit ConnectionListener(boost::asio::io_context& context);
+    ConnectionListener(boost::asio::io_context& context,
+                       ConnectionMap& connections);
+
     void establishListener();
 
 private:
     void acceptNextConnection();
     boost::asio::ip::tcp::acceptor acceptor;
+    ConnectionMap& connections_;
 };
-
 
 #endif //RELAY_CONNECTIONLISTENER_H

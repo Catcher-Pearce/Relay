@@ -1,4 +1,5 @@
 #include "ConnectionListener.h"
+#include "ConnectionSession.h"
 
 #include <boost/asio.hpp>
 #include <iostream>
@@ -7,8 +8,15 @@
 
 using boost::asio::ip::tcp;
 
-ConnectionListener::ConnectionListener(boost::asio::io_context& context)
-    : acceptor(context) {}
+#include <utility>
+
+ConnectionListener::ConnectionListener(
+    boost::asio::io_context& context,
+    ConnectionMap& connections)
+    : acceptor(context),
+      connections_(connections)
+{
+}
 
 void ConnectionListener::establishListener() {
     const tcp::endpoint endpoint(tcp::v4(), 12345);
@@ -33,22 +41,14 @@ void ConnectionListener::acceptNextConnection() {
             return;
         }
 
-        // Keep accepting while this client's greeting is being sent.
+        // Continue accepting while existing sessions receive messages.
         acceptNextConnection();
         if (error) {
             std::cerr << "Accept error: " << error.message() << std::endl;
             return;
         }
 
-        auto connection = std::make_shared<tcp::socket>(std::move(socket));
-        auto message = std::make_shared<std::string>("Hello from Relay!\n");
-
-        boost::asio::async_write(*connection, boost::asio::buffer(*message),
-            [connection, message](boost::system::error_code writeError, std::size_t) {
-                if (writeError && writeError != boost::asio::error::operation_aborted) {
-                    std::cerr << "Write error: " << writeError.message() << std::endl;
-                }
-                // Captures keep the socket and buffer alive through completion.
-            });
+        auto session = std::make_shared<ConnectionSession>(std::move(socket), connections_);
+        session->start();
     });
 }

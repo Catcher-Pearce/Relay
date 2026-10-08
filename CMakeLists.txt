@@ -17,6 +17,11 @@ qt_add_executable(Relay
         Core/Connection/ConnectionSender.h
         Core/Connection/ConnectionManager.cpp
         Core/Connection/ConnectionManager.h
+        Core/Connection/ConnectionMap.h
+        Core/Connection/ConnectionSession.cpp
+        Core/Connection/ConnectionSession.h
+        Core/Connection/MessageHandler.cpp
+        Core/Connection/MessageHandler.h
 )
 
 target_link_libraries(Relay PRIVATE Qt6::Widgets Boost::headers Threads::Threads)
