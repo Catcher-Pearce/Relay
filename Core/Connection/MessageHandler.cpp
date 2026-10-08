@@ -1,18 +1,15 @@
 #include "MessageHandler.h"
-
 #include <iostream>
+#include <utility>
 
 namespace relay {
-
-void handleMessage(ConnectionMap& connections, ConnectionSession& session,
-                   ConnectionSession::Message message) {
-    std::cout << "Received message type " << static_cast<unsigned int>(message.type)
-              << ", request " << message.requestId
-              << ", payload " << message.payload.size() << " bytes\n";
-
+void handleMessage(ConnectionSession& session, ConnectionSession::Message message) {
     if (message.type == ConnectionSession::MessageType::Ping) {
-
+        std::cout << "Received PING, request " << message.requestId << std::endl;
+        session.send({ConnectionSession::MessageType::Pong, message.requestId, std::move(message.payload)});
+    } else {
+        // A PONG is a response, so it does not trigger another response.
+        std::cout << "Received PONG, request " << message.requestId << std::endl;
     }
 }
-
 }

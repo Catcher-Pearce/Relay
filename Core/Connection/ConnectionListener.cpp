@@ -1,54 +1,34 @@
 #include "ConnectionListener.h"
-#include "ConnectionSession.h"
-
+#include "ConnectionManager.h"
 #include <boost/asio.hpp>
 #include <iostream>
-#include <memory>
-#include <string>
+#include <utility>
 
 using boost::asio::ip::tcp;
 
-#include <utility>
+ConnectionListener::ConnectionListener(boost::asio::io_context& context, ConnectionManager& manager)
+    : acceptor_(context), manager_(manager) {}
 
-ConnectionListener::ConnectionListener(
-    boost::asio::io_context& context,
-    ConnectionMap& connections)
-    : acceptor(context),
-      connections_(connections)
-{
-}
-
-void ConnectionListener::establishListener() {
-    const tcp::endpoint endpoint(tcp::v4(), 12345);
-    try {
-        acceptor.open(endpoint.protocol());
-        acceptor.set_option(tcp::acceptor::reuse_address(true));
-        acceptor.bind(endpoint);
-        acceptor.listen();
-        acceptNextConnection();
-        std::cout << "Successfully listening on port " << endpoint.port()
-                  << "..." << std::endl;
-    } catch (...) {
-        boost::system::error_code ignored;
-        acceptor.close(ignored);
-        throw;
-    }
+void ConnectionListener::establishListener(unsigned short port) {
+    tcp::endpoint endpoint(tcp::v4(), port);
+    acceptor_.open(endpoint.protocol());
+    acceptor_.set_option(tcp::acceptor::reuse_address(true));
+    acceptor_.bind(endpoint);
+    acceptor_.listen();
+    std::cout << "Listening on port " << acceptor_.local_endpoint().port() << std::endl;
+    acceptNextConnection();
 }
 
 void ConnectionListener::acceptNextConnection() {
-    acceptor.async_accept([this](boost::system::error_code error, tcp::socket socket) {
+    acceptor_.async_accept([this](boost::system::error_code error, tcp::socket socket) {
         if (error == boost::asio::error::operation_aborted) {
             return;
         }
-
-        // Continue accepting while existing sessions receive messages.
-        acceptNextConnection();
         if (error) {
             std::cerr << "Accept error: " << error.message() << std::endl;
-            return;
+        } else {
+            manager_.addConnection(std::move(socket));
         }
-
-        auto session = std::make_shared<ConnectionSession>(std::move(socket), connections_);
-        session->start();
+        acceptNextConnection();
     });
 }

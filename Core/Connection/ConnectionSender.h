@@ -1,21 +1,15 @@
-//
-// Created by catcherpearce on 10/7/26.
-//
-
-#ifndef RELAY_CONNECTIONSENDER_H
-#define RELAY_CONNECTIONSENDER_H
-
+#pragma once
 #include <boost/asio/io_context.hpp>
+#include <string>
 
+class ConnectionManager;
 
 class ConnectionSender {
 public:
-    explicit ConnectionSender(boost::asio::io_context& context);
-    void sendConnectionRequest();
+    ConnectionSender(boost::asio::io_context& context, ConnectionManager& manager);
+    void sendConnectionRequest(const std::string& address, unsigned short port);
 
 private:
-    boost::asio::io_context& io_context;
+    boost::asio::io_context& context_;
+    ConnectionManager& manager_;
 };
-
-
-#endif //RELAY_CONNECTIONSENDER_H

@@ -1,39 +1,31 @@
-//
-// Created by catcherpearce on 10/7/26.
-//
-
 #include "ConnectionSender.h"
-
+#include "ConnectionManager.h"
+#include "ConnectionSession.h"
 #include <boost/asio.hpp>
 #include <iostream>
-#include <string>
+#include <memory>
+#include <utility>
 
 using boost::asio::ip::tcp;
 
-ConnectionSender::ConnectionSender(boost::asio::io_context& context)
-    : io_context(context) {}
+ConnectionSender::ConnectionSender(boost::asio::io_context& context, ConnectionManager& manager)
+    : context_(context), manager_(manager) {}
 
-void ConnectionSender::sendConnectionRequest() {
-    try {
-        boost::asio::ip::tcp::socket socket(io_context);
-
-        std::string server_ip = "127.0.0.1";
-        unsigned short port = 12345;
-
-        boost::asio::ip::tcp::endpoint endpoint(
-            boost::asio::ip::make_address(server_ip),
-            port
-        );
-
-        std::cout << "Connecting to " << server_ip << ":" << port << "..." << std::endl;
-        socket.connect(endpoint);
-
-        std::cout << "Successfully connected!" << std::endl;
-
-        socket.close();
-
-    } catch (std::exception& e) {
-        std::cerr << "Connection error: " << e.what() << std::endl;
+void ConnectionSender::sendConnectionRequest(const std::string& address, unsigned short port) {
+    boost::system::error_code error;
+    auto ip = boost::asio::ip::make_address(address, error);
+    if (error) {
+        std::cerr << "Invalid IP address: " << error.message() << std::endl;
+        return;
     }
+    auto socket = std::make_shared<tcp::socket>(context_);
+    socket->async_connect(tcp::endpoint(ip, port),
+        [this, socket](boost::system::error_code connectError) {
+            if (connectError) {
+                std::cerr << "Connect error: " << connectError.message() << std::endl;
+                return;
+            }
+            auto session = manager_.addConnection(std::move(*socket));
+            session->send({ConnectionSession::MessageType::Ping, 1, {}});
+        });
 }
-
