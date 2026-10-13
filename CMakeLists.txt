@@ -19,6 +19,8 @@ add_executable(Relay
         Core/Connection/ConnectionSession.h
         Core/Connection/MessageHandler.cpp
         Core/Connection/MessageHandler.h
+        Core/Auth/DeviceIdentity.cpp
+        Core/Auth/DeviceIdentity.h
 )
 
 target_link_libraries(Relay PRIVATE Boost::headers Threads::Threads)

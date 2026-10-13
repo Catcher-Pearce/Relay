@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "Auth/DeviceIdentity.h"
+
 int main(int argc, char* argv[]) {
     try {
         ConnectionManager manager;

@@ -1,17 +1,39 @@
 #include "ConnectionSession.h"
 #include "MessageHandler.h"
+#include "../Auth/DeviceIdentity.h"
 #include <boost/asio.hpp>
 #include <iostream>
 #include <utility>
 
 ConnectionSession::ConnectionSession(boost::asio::ip::tcp::socket socket,
-                                     std::uint64_t connectionId, std::function<void()> onClosed)
+                                     std::uint64_t connectionId, std::function<void()> onClosed,
+                                     std::function<void(const std::string&)> onHello)
     : socket_(std::move(socket)), connectionId_(connectionId),
-      onClosed_(std::move(onClosed)) {}
+      onClosed_(std::move(onClosed)), onHello_(std::move(onHello)) {}
 
 void ConnectionSession::start() {
     std::cout << "Connection " << connectionId_ << " established" << std::endl;
+    const auto deviceId = getOrCreateDeviceId();
+    send({MessageType::Hello, 1, {deviceId.begin(), deviceId.end()}});
     readHeader();
+}
+
+void ConnectionSession::identifyPeer(std::string peerId) {
+    if (closed_) {
+        return;
+    }
+    if (peerId.empty() || (!peerId_.empty() && peerId_ != peerId)) {
+        finish(boost::asio::error::invalid_argument);
+        return;
+    }
+    if (!peerId_.empty()) {
+        return;
+    }
+    peerId_ = std::move(peerId);
+    if (onHello_) {
+        auto notify = std::move(onHello_);
+        notify(peerId_);
+    }
 }
 
 void ConnectionSession::readHeader() {
@@ -23,7 +45,7 @@ void ConnectionSession::readHeader() {
                 return;
             }
             const auto rawType = self->readHeader_[0];
-            if (rawType > static_cast<std::uint8_t>(MessageType::Pong)) {
+            if (rawType > static_cast<std::uint8_t>(MessageType::Hello)) {
                 self->finish(boost::asio::error::invalid_argument);
                 return;
             }
@@ -50,6 +72,10 @@ void ConnectionSession::readBody(MessageType type, std::uint64_t requestId, std:
         [self, type, requestId](boost::system::error_code error, std::size_t) {
             if (error) {
                 self->finish(error);
+                return;
+            }
+            if (self->peerId_.empty() && type != MessageType::Hello) {
+                self->finish(boost::asio::error::invalid_argument);
                 return;
             }
             relay::handleMessage(*self, {type, requestId, std::move(self->readBuffer_)});

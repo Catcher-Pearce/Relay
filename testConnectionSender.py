@@ -2,7 +2,7 @@ import argparse
 import socket
 import sys
 
-from testSessionMessages import PING, PONG, frame, read_message
+from testSessionMessages import PING, PONG, frame, read_message, handshake
 
 
 def main():
@@ -16,6 +16,7 @@ def main():
         print(f"Connecting to {args.host}:{args.port}...", flush=True)
         with socket.create_connection((args.host, args.port), timeout=5) as connection:
             print("Connected!", flush=True)
+            handshake(connection, b'python-test-peer')
             payload = args.message.encode("utf-8")
             connection.sendall(frame(PING, 1, payload))
             response = read_message(connection)

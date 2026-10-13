@@ -7,9 +7,10 @@ void handleMessage(ConnectionSession& session, ConnectionSession::Message messag
     if (message.type == ConnectionSession::MessageType::Ping) {
         std::cout << "Received PING, request " << message.requestId << std::endl;
         session.send({ConnectionSession::MessageType::Pong, message.requestId, std::move(message.payload)});
-    } else {
-        // A PONG is a response, so it does not trigger another response.
+    } else if (message.type == ConnectionSession::MessageType::Pong) {
         std::cout << "Received PONG, request " << message.requestId << std::endl;
+    } else if (message.type == ConnectionSession::MessageType::Hello) {
+        session.identifyPeer(std::string(message.payload.begin(), message.payload.end()));
     }
 }
 }

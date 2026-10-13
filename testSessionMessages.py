@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-PING, PONG = 0, 1
+PING, PONG, HELLO = 0, 1, 2
 HEADER = struct.Struct('!BQI')  # type, request ID, payload length; big-endian
 
 
@@ -32,6 +32,12 @@ def read_exact(connection, count):
 def read_message(connection):
     kind, request_id, size = HEADER.unpack(read_exact(connection, HEADER.size))
     return kind, request_id, read_exact(connection, size)
+
+
+def handshake(connection, peer_id):
+    kind, _, payload = read_message(connection)
+    assert kind == HELLO and payload, (kind, payload)
+    connection.sendall(frame(HELLO, 1, peer_id))
 
 
 class RelayProcess:
@@ -82,6 +88,7 @@ def test_incoming(executable):
         relay.wait_for('Press Enter to stop.')
         port = int(re.search(r'Listening on port (\d+)', relay.output).group(1))
         with socket.create_connection(('127.0.0.1', port), timeout=5) as client:
+            handshake(client, b'first-peer')
             first = frame(PING, 0x0102030405060708, b'fragmented')
             client.sendall(first[:3])
             time.sleep(0.05)
@@ -105,6 +112,7 @@ def test_incoming(executable):
             # Both sessions stay usable while the manager owns them.
             client.settimeout(5)
             with socket.create_connection(('127.0.0.1', port), timeout=5) as second:
+                handshake(second, b'second-peer')
                 client.sendall(frame(PING, 600, b'first'))
                 second.sendall(frame(PING, 601, b'second'))
                 assert read_message(client) == (PONG, 600, b'first')
@@ -114,10 +122,12 @@ def test_incoming(executable):
         # Malformed frames close only their own session.
         for malformed in (HEADER.pack(99, 0, 0), HEADER.pack(PING, 0, 1048577)):
             with socket.create_connection(('127.0.0.1', port), timeout=5) as client:
+                handshake(client, b'malformed-peer')
                 client.sendall(malformed)
                 assert client.recv(1) == b''
         # The listener and registry still work after disconnected sessions.
         with socket.create_connection(('127.0.0.1', port), timeout=5) as client:
+            handshake(client, b'reconnected-peer')
             client.sendall(frame(PING, 999, b'still listening'))
             assert read_message(client) == (PONG, 999, b'still listening')
         print('PASS incoming: fragmented header, burst queue, binary/empty payloads, IDs, PONG, disconnects, invalid frames')
@@ -136,15 +146,64 @@ def test_outgoing(executable):
             client, _ = server.accept()
             with client:
                 client.settimeout(5)
-                assert read_message(client) == (PING, 1, b'')
+                handshake(client, b'outgoing-peer')
                 client.sendall(frame(PONG, 1))
                 relay.wait_for('Received PONG, request 1')
                 # Outgoing connections use the exact same receive/respond path.
                 client.sendall(frame(PING, 77, b'outgoing session'))
                 assert read_message(client) == (PONG, 77, b'outgoing session')
             relay.wait_for('Connection 1 closed')
-            print('PASS outgoing: retained session sends PING, receives PONG, and answers PING')
+            print('PASS outgoing: Hello handshake registers session, receives PONG, and answers PING')
         finally:
+            relay.stop()
+
+
+def test_registration(executable):
+    relay = RelayProcess(executable, '--listen', '0')
+    sockets = []
+    try:
+        relay.wait_for('Press Enter to stop.')
+        port = int(re.search(r'Listening on port (\d+)', relay.output).group(1))
+        def connect():
+            client = socket.create_connection(('127.0.0.1', port), timeout=5)
+            sockets.append(client)
+            kind, _, payload = read_message(client)
+            assert kind == HELLO and payload
+            return client
+
+        first = connect()
+        first.sendall(frame(HELLO, 1, b'same-peer') + frame(PING, 2))
+        assert read_message(first) == (PONG, 2, b'')
+        # Repeated Hello must neither reply nor register again.
+        first.sendall(frame(HELLO, 3, b'same-peer') + frame(PING, 4))
+        assert read_message(first) == (PONG, 4, b'')
+        duplicate = connect()
+        duplicate.sendall(frame(HELLO, 1, b'same-peer'))
+        assert duplicate.recv(1) == b''
+        first.sendall(frame(PING, 5))
+        assert read_message(first) == (PONG, 5, b'')
+        first.close()
+        relay.wait_for('Connection 1 closed')
+        replacement = connect()
+        replacement.sendall(frame(HELLO, 1, b'same-peer') + frame(PING, 6))
+        assert read_message(replacement) == (PONG, 6, b'')
+        for kind, payload in ((HELLO, b''), (PING, b'')):
+            invalid = connect()
+            invalid.sendall(frame(kind, 1, payload))
+            assert invalid.recv(1) == b''
+        changed = connect()
+        changed.sendall(frame(HELLO, 1, b'original') + frame(HELLO, 2, b'changed'))
+        assert changed.recv(1) == b''
+        # Shutdown must close both registered and unintroduced sessions.
+        pending = connect()
+        relay.stop()
+        assert pending.recv(1) == b''
+        assert replacement.recv(1) == b''
+        print('PASS registration: duplicate/repeated/changed IDs, reconnect, invalid greeting, pending shutdown')
+    finally:
+        for client in sockets:
+            client.close()
+        if relay.process.poll() is None:
             relay.stop()
 
 
@@ -156,6 +215,7 @@ def main():
     try:
         test_incoming(args.relay.resolve())
         test_outgoing(args.relay.resolve())
+        test_registration(args.relay.resolve())
     except (OSError, AssertionError, subprocess.TimeoutExpired) as error:
         print(f'FAIL: {error}', file=sys.stderr)
         return 1

@@ -27,7 +27,7 @@ void ConnectionListener::acceptNextConnection() {
         if (error) {
             std::cerr << "Accept error: " << error.message() << std::endl;
         } else {
-            manager_.addConnection(std::move(socket));
+            manager_.addPendingConnection(std::move(socket));
         }
         acceptNextConnection();
     });

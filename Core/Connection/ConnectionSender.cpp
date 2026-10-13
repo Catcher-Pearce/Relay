@@ -1,10 +1,10 @@
 #include "ConnectionSender.h"
 #include "ConnectionManager.h"
-#include "ConnectionSession.h"
 #include <boost/asio.hpp>
 #include <iostream>
 #include <memory>
 #include <utility>
+
 
 using boost::asio::ip::tcp;
 
@@ -25,7 +25,6 @@ void ConnectionSender::sendConnectionRequest(const std::string& address, unsigne
                 std::cerr << "Connect error: " << connectError.message() << std::endl;
                 return;
             }
-            auto session = manager_.addConnection(std::move(*socket));
-            session->send({ConnectionSession::MessageType::Ping, 1, {}});
+            manager_.addPendingConnection(std::move(*socket));
         });
 }
