@@ -1,21 +1,39 @@
 #include "ConnectionSession.h"
 #include "MessageHandler.h"
-#include "../Auth/DeviceIdentity.h"
 #include <boost/asio.hpp>
 #include <iostream>
 #include <utility>
+#include <stdexcept>
 
 ConnectionSession::ConnectionSession(boost::asio::ip::tcp::socket socket,
+                                     ConnectionSession::Direction direction,
                                      std::uint64_t connectionId, std::function<void()> onClosed,
                                      std::function<void(const std::string&)> onHello)
-    : socket_(std::move(socket)), connectionId_(connectionId),
+    : socket_(std::move(socket)), connectionId_(connectionId), direction_(direction),
       onClosed_(std::move(onClosed)), onHello_(std::move(onHello)) {}
 
-void ConnectionSession::start() {
+FileTransfer& ConnectionSession::addFileTransfer(std::uint64_t requestId,
+                                                std::unique_ptr<FileTransfer> transfer) {
+    if (closed_) throw std::logic_error("Cannot add a transfer to a closed session");
+    if (!transfer) throw std::invalid_argument("File transfer must not be null");
+    const auto [entry, inserted] = transfers_.try_emplace(requestId, std::move(transfer));
+    if (!inserted) throw std::logic_error("A transfer with this request ID already exists");
+    return *entry->second;
+}
+
+void ConnectionSession::start(const std::string& deviceId) {
     std::cout << "Connection " << connectionId_ << " established" << std::endl;
-    const auto deviceId = getOrCreateDeviceId();
     send({MessageType::Hello, 1, {deviceId.begin(), deviceId.end()}});
     readHeader();
+}
+
+void ConnectionSession::removeFileTransfer(std::uint64_t requestId) {
+    transfers_.erase(requestId);
+}
+
+FileTransfer* ConnectionSession::findFileTransfer(std::uint64_t requestId) {
+    const auto entry = transfers_.find(requestId);
+    return entry == transfers_.end() ? nullptr : entry->second.get();
 }
 
 void ConnectionSession::identifyPeer(std::string peerId) {
@@ -45,7 +63,7 @@ void ConnectionSession::readHeader() {
                 return;
             }
             const auto rawType = self->readHeader_[0];
-            if (rawType > static_cast<std::uint8_t>(MessageType::Hello)) {
+            if (rawType > static_cast<std::uint8_t>(MessageType::FileTransferError)) {
                 self->finish(boost::asio::error::invalid_argument);
                 return;
             }

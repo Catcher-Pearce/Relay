@@ -3,8 +3,11 @@
 #include <boost/asio/post.hpp>
 #include <utility>
 
-ConnectionManager::ConnectionManager()
-    : work_(boost::asio::make_work_guard(context_)),
+#include "../Auth/DeviceIdentity.h"
+
+ConnectionManager::ConnectionManager(std::string deviceId)
+    : deviceId_(deviceId.empty() ? getOrCreateDeviceId() : std::move(deviceId)),
+      work_(boost::asio::make_work_guard(context_)),
       listener_(context_, *this), sender_(context_, *this),
       worker_([this] { context_.run(); }) {}
 
@@ -22,9 +25,9 @@ ConnectionManager::~ConnectionManager() {
     }
 }
 
-void ConnectionManager::establishListener(unsigned short port) {
+unsigned short ConnectionManager::establishListener(unsigned short port) {
     // Called once from main before it can initiate any other listener operation.
-    listener_.establishListener(port);
+    return listener_.establishListener(port);
 }
 
 void ConnectionManager::sendConnectionRequest(const std::string& address, unsigned short port) {
@@ -34,13 +37,13 @@ void ConnectionManager::sendConnectionRequest(const std::string& address, unsign
 }
 
 std::shared_ptr<ConnectionSession>
-ConnectionManager::addPendingConnection(boost::asio::ip::tcp::socket socket) {
+ConnectionManager::addPendingConnection(boost::asio::ip::tcp::socket socket, ConnectionSession::Direction direction) {
     const auto connectionId = nextConnectionId_++;
-    auto session = std::make_shared<ConnectionSession>(std::move(socket), connectionId,
+    auto session = std::make_shared<ConnectionSession>(std::move(socket), direction, connectionId,
         [this, connectionId] { removeConnection(connectionId); },
         [this, connectionId](const std::string& peerId) { addConnection(connectionId, peerId); });
     pendingConnections_.emplace(connectionId, session);
-    session->start();
+    session->start(deviceId_);
     return session;
 }
 
@@ -49,7 +52,20 @@ void ConnectionManager::addConnection(std::uint64_t connectionId, const std::str
     if (pending == pendingConnections_.end()) {
         return;
     }
+
     auto session = pending->second;
+
+    const auto& localId = deviceId_;
+    const auto direction = session->direction();
+
+    if ((peerId > localId &&
+         direction == ConnectionSession::Direction::Outgoing) ||
+        (peerId < localId &&
+         direction == ConnectionSession::Direction::Incoming)) {
+        session->close();
+        return;
+    }
+
     // Keep the existing connection if this peer is already registered.
     if (!connections_.emplace(peerId, session).second) {
         session->close();
@@ -66,4 +82,34 @@ void ConnectionManager::removeConnection(std::uint64_t connectionId) {
             return;
         }
     }
+}
+
+std::future<ConnectionManager::Snapshot> ConnectionManager::snapshot() {
+    auto result = std::make_shared<std::promise<Snapshot>>();
+    auto future = result->get_future();
+    boost::asio::post(context_, [this, result] {
+        Snapshot state{pendingConnections_.size(), {}};
+        for (const auto& [peerId, session] : connections_) {
+            state.connections.push_back({peerId, session->direction(),
+                                         session->localEndpoint(), session->remoteEndpoint()});
+        }
+        result->set_value(std::move(state));
+    });
+    return future;
+}
+
+std::future<bool> ConnectionManager::sendMessage(const std::string& peerId,
+                                                ConnectionSession::Message message) {
+    auto result = std::make_shared<std::promise<bool>>();
+    auto future = result->get_future();
+    boost::asio::post(context_, [this, peerId, message = std::move(message), result]() mutable {
+        const auto peer = connections_.find(peerId);
+        if (peer == connections_.end()) {
+            result->set_value(false);
+            return;
+        }
+        peer->second->send(std::move(message));
+        result->set_value(true);
+    });
+    return future;
 }

@@ -25,6 +25,6 @@ void ConnectionSender::sendConnectionRequest(const std::string& address, unsigne
                 std::cerr << "Connect error: " << connectError.message() << std::endl;
                 return;
             }
-            manager_.addPendingConnection(std::move(*socket));
+            manager_.addPendingConnection(std::move(*socket), ConnectionSession::Direction::Outgoing);
         });
 }

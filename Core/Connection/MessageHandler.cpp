@@ -1,16 +1,172 @@
 #include "MessageHandler.h"
 #include <iostream>
 #include <utility>
+#include <algorithm>
+#include <stdexcept>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+
+#include "FileShare/FileTransfer.h"
+#include "FileShare/FolderManager.h"
 
 namespace relay {
-void handleMessage(ConnectionSession& session, ConnectionSession::Message message) {
-    if (message.type == ConnectionSession::MessageType::Ping) {
-        std::cout << "Received PING, request " << message.requestId << std::endl;
-        session.send({ConnectionSession::MessageType::Pong, message.requestId, std::move(message.payload)});
-    } else if (message.type == ConnectionSession::MessageType::Pong) {
-        std::cout << "Received PONG, request " << message.requestId << std::endl;
-    } else if (message.type == ConnectionSession::MessageType::Hello) {
-        session.identifyPeer(std::string(message.payload.begin(), message.payload.end()));
+namespace {
+
+void handlePing(ConnectionSession& session, ConnectionSession::Message& message) {
+    std::cout << "Received PING, request " << message.requestId << std::endl;
+    session.send({ConnectionSession::MessageType::Pong, message.requestId, std::move(message.payload)});
+}
+
+void handlePong(ConnectionSession&, ConnectionSession::Message& message) {
+    std::cout << "Received PONG, request " << message.requestId << std::endl;
+}
+
+void handleHello(ConnectionSession& session, ConnectionSession::Message& message) {
+    session.identifyPeer(std::string(message.payload.begin(), message.payload.end()));
+}
+
+void handleFileSystemRequest(ConnectionSession& session, ConnectionSession::Message& message) {
+    FolderManager folders;
+    const auto json = folders.getFileSystem();
+
+    session.send({
+        ConnectionSession::MessageType::FileSystemResponse,
+        message.requestId,
+        {json.begin(), json.end()}
+    });
+}
+
+void handleFileSystemResponse(ConnectionSession&, ConnectionSession::Message& message) {
+    std::cout << "Received file system response, request " << message.requestId << '\n'
+              << std::string(message.payload.begin(), message.payload.end()) << std::endl;
+}
+
+void handleFileRequest(ConnectionSession& session, ConnectionSession::Message& message) {
+    bool registered = false;
+    try {
+        // FileRequest payload is a UTF-8 path relative to relay-shared.
+        if (message.payload.empty() ||
+            std::find(message.payload.begin(), message.payload.end(), 0) != message.payload.end()) {
+            throw std::invalid_argument("File request must contain a nonempty path without null bytes");
+        }
+        const std::u8string requestedPath(message.payload.begin(), message.payload.end());
+        FolderManager folders;
+        auto& transfer = session.addFileTransfer(message.requestId, std::make_unique<FileTransfer>(
+            session.weak_from_this(), folders.sharedFolder(), folders.downloadsFolder()));
+        registered = true;
+        transfer.sendFile(message.requestId, std::filesystem::path(requestedPath));
+        if (transfer.state() == FileTransfer::State::Completed) {
+            session.removeFileTransfer(message.requestId);
+        }
+    } catch (const std::exception& error) {
+        if (registered) session.removeFileTransfer(message.requestId);
+        const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
+            .toJson(QJsonDocument::Compact);
+        session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
+                      {json.begin(), json.end()}});
     }
 }
+
+void handleFileChunkAck(ConnectionSession& session, ConnectionSession::Message& message) {
+    auto* transfer = session.findFileTransfer(message.requestId);
+    try {
+        if (!transfer) throw std::invalid_argument("Unknown transfer ID in chunk acknowledgment");
+        if (message.payload.size() != 8) {
+            throw std::invalid_argument("Chunk acknowledgment must contain an 8-byte offset");
+        }
+        std::uint64_t offset = 0;
+        for (const auto byte : message.payload) offset = (offset << 8) | byte;
+        if (transfer->state() != FileTransfer::State::Sending ||
+            transfer->transferId() != message.requestId ||
+            offset != transfer->bytesTransferred()) {
+            throw std::invalid_argument("Chunk acknowledgment does not match the outgoing transfer");
+        }
+        transfer->sendNextChunk();
+        if (transfer->state() == FileTransfer::State::Completed) {
+            session.removeFileTransfer(message.requestId);
+        }
+    } catch (const std::exception& error) {
+        if (transfer && transfer->state() == FileTransfer::State::Failed) {
+            session.removeFileTransfer(message.requestId);
+        }
+        const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
+            .toJson(QJsonDocument::Compact);
+        session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
+                      {json.begin(), json.end()}});
+    }
 }
+
+void handleFileTransferStart(ConnectionSession& session, ConnectionSession::Message& message) {
+    bool registered = false;
+    try {
+        const QByteArray payload(reinterpret_cast<const char*>(message.payload.data()),
+                                 static_cast<qsizetype>(message.payload.size()));
+        QJsonParseError parseError;
+        const auto document = QJsonDocument::fromJson(payload, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+            throw std::invalid_argument("Transfer metadata must be a valid JSON object");
+        }
+        const auto metadata = document.object();
+        const auto pathValue = metadata.value("path");
+        const auto sizeValue = metadata.value("size");
+        const auto expectedSize = sizeValue.toInteger(-1);
+        if (!pathValue.isString() || pathValue.toString().isEmpty() ||
+            pathValue.toString().contains(QChar::Null)) {
+            throw std::invalid_argument("Transfer metadata must contain a nonempty path without null characters");
+        }
+        if (!sizeValue.isDouble() || expectedSize < 0) {
+            throw std::invalid_argument("Transfer metadata size must be a nonnegative 64-bit integer");
+        }
+        if (session.findFileTransfer(message.requestId)) {
+            throw std::invalid_argument("A transfer with this request ID already exists");
+        }
+        const auto relativePath = std::filesystem::path(pathValue.toString().toStdU16String());
+        FolderManager folders;
+        auto& transfer = session.addFileTransfer(message.requestId, std::make_unique<FileTransfer>(
+            session.weak_from_this(), folders.sharedFolder(), folders.downloadsFolder()));
+        registered = true;
+        transfer.beginReceive(message.requestId, relativePath, static_cast<std::uint64_t>(expectedSize));
+    } catch (const std::exception& error) {
+        if (registered) session.removeFileTransfer(message.requestId);
+        const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
+            .toJson(QJsonDocument::Compact);
+        session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
+                      {json.begin(), json.end()}});
+    }
+}
+
+} // namespace
+
+void handleMessage(ConnectionSession& session, ConnectionSession::Message message) {
+    switch (message.type) {
+    case ConnectionSession::MessageType::Ping:
+        handlePing(session, message);
+        break;
+    case ConnectionSession::MessageType::Pong:
+        handlePong(session, message);
+        break;
+    case ConnectionSession::MessageType::Hello:
+        handleHello(session, message);
+        break;
+    case ConnectionSession::MessageType::FileSystemRequest:
+        handleFileSystemRequest(session, message);
+        break;
+    case ConnectionSession::MessageType::FileSystemResponse:
+        handleFileSystemResponse(session, message);
+        break;
+    case ConnectionSession::MessageType::FileRequest:
+        handleFileRequest(session, message);
+        break;
+    case ConnectionSession::MessageType::FileChunkAck:
+        handleFileChunkAck(session, message);
+        break;
+    case ConnectionSession::MessageType::FileTransferStart:
+        handleFileTransferStart(session, message);
+        break;
+    default:
+        break;
+    }
+}
+
+} // namespace relay

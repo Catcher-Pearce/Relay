@@ -20,10 +20,11 @@ public:
     /**
      * @brief Opens an IPv4 listener and starts accepting connections.
      * @param port Local TCP port; zero lets the operating system choose a free port.
+     * @return Bound local port.
      * @throws boost::system::system_error If opening, binding, or listening fails.
      * @note Call once during startup, before other listener operations can run.
      */
-    void establishListener(unsigned short port);
+    unsigned short establishListener(unsigned short port);
 
 private:
     /**

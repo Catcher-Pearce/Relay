@@ -6,9 +6,13 @@
 #include <boost/asio/io_context.hpp>
 #include <cstdint>
 #include <memory>
+#include <future>
+#include <vector>
 #include <string>
 #include <thread>
 #include <unordered_map>
+
+#include "ConnectionSession.h"
 
 class ConnectionSession;
 
@@ -23,11 +27,12 @@ class ConnectionSession;
 class ConnectionManager {
 public:
     /**
-     * @brief Initializes networking and immediately starts the network worker.
+     * @brief Loads the local identity, initializes networking, and starts the worker.
+     * @param deviceId Explicit identity, or empty to load/create the persistent device ID.
      *
      * A work guard keeps the worker running even when there are no connections.
      */
-    ConnectionManager();
+    explicit ConnectionManager(std::string deviceId = {});
     /**
      * @brief Stops and joins the worker, then closes pending and registered sessions.
      * @note Destroy from outside the network worker, with no concurrent manager calls.
@@ -45,10 +50,26 @@ public:
     /**
      * @brief Starts accepting incoming IPv4 connections.
      * @param port Local TCP port; defaults to 12345, and zero requests a free port.
+     * @return Bound local port, including the assigned port when zero was requested.
      * @throws boost::system::system_error If listener setup fails.
      * @note Call once during startup before other listener operations can run.
      */
-    void establishListener(unsigned short port = 12345);
+    unsigned short establishListener(unsigned short port = 12345);
+
+    struct ConnectionInfo {
+        std::string peerId;
+        ConnectionSession::Direction direction;
+        boost::asio::ip::tcp::endpoint localEndpoint;
+        boost::asio::ip::tcp::endpoint remoteEndpoint;
+    };
+    struct Snapshot {
+        std::size_t pendingCount;
+        std::vector<ConnectionInfo> connections;
+    };
+    // Read registries on the network worker; keep the manager alive until completion.
+    std::future<Snapshot> snapshot();
+    // Queues a message on the network worker. False means the peer is disconnected.
+    std::future<bool> sendMessage(const std::string& peerId, ConnectionSession::Message message);
     /**
      * @brief Posts an outgoing connection request to the network worker.
      * @param address Numeric IPv4 or IPv6 address of the remote device.
@@ -62,13 +83,14 @@ public:
     /**
      * @brief Takes ownership of a connected socket and starts its Hello exchange.
      * @param socket Connected socket transferred into the new session.
+     * @param direction Whether this computer accepted or initiated the socket.
      * @return Shared ownership of the session, also retained in the pending registry.
      *
      * Assigns a local connection ID and installs callbacks for peer registration and
      * removal on close. start() sends the local device ID and begins reading messages.
      * @note Call only on the network thread.
      */
-    std::shared_ptr<ConnectionSession> addPendingConnection(boost::asio::ip::tcp::socket socket);
+    std::shared_ptr<ConnectionSession> addPendingConnection(boost::asio::ip::tcp::socket socket, ConnectionSession::Direction direction);
     /**
      * @brief Releases registry ownership of a closed session by its local ID.
      * @param connectionId Local numeric ID assigned when the session was created.
@@ -85,11 +107,14 @@ private:
      * @param connectionId Local numeric ID used to find the pending session.
      * @param peerId Remote device ID extracted from the Hello payload.
      *
-     * Unknown pending IDs are ignored. If the peer ID is already registered, the
+     * The larger device ID keeps outgoing; the smaller keeps incoming.
+     * Sessions in the other direction are closed. Unknown pending IDs are ignored.
+     * If the peer ID is already registered, the
      * new session is closed and the existing connection remains registered.
      * @note Call only on the network thread through the session's Hello callback.
      */
     void addConnection(std::uint64_t connectionId, const std::string& peerId);
+    const std::string deviceId_;
     boost::asio::io_context context_;
     // Keeps run() waiting even before any connections exist.
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_;

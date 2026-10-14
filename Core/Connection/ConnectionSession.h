@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FileShare/FileTransfer.h"
 #include <boost/asio/ip/tcp.hpp>
 #include <array>
 #include <cstddef>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 /**
  * @brief Owns one TCP socket and exchanges framed messages with a remote peer.
@@ -25,9 +27,27 @@
 class ConnectionSession : public std::enable_shared_from_this<ConnectionSession> {
 public:
     /**
+     * @brief Whether this computer accepted or initiated the connection.
+     */
+    enum class Direction { Incoming, Outgoing };
+
+    /**
      * @brief Wire message kinds: Ping requests a Pong, and Hello carries a device ID.
      */
-    enum class MessageType : std::uint8_t { Ping = 0, Pong = 1, Hello = 2 };
+    enum class MessageType : std::uint8_t {
+        Ping = 0,
+        Pong = 1,
+        Hello = 2,
+        FileSystemRequest = 3,
+        FileSystemResponse = 4,
+        FileRequest = 5,
+        FileResponse = 6,
+        FileTransferStart = 7,
+        FileChunk = 8,
+        FileChunkAck = 9,
+        FileTransferComplete = 10,
+        FileTransferError = 11
+    };
     /**
      * @brief A decoded or outgoing message with a type, request ID, and raw payload.
      *
@@ -43,6 +63,7 @@ public:
     /**
      * @brief Takes ownership of a connected socket and stores lifecycle callbacks.
      * @param socket Connected TCP socket transferred into this session.
+     * @param direction Whether this computer accepted or initiated the socket.
      * @param connectionId Local numeric ID assigned by the manager, independent of peer ID.
      * @param onClosed Callback invoked once after socket cleanup to remove registry ownership.
      * @param onHello Callback invoked once with the first valid peer ID to register the session.
@@ -51,14 +72,15 @@ public:
      * of them; callbacks may be empty.
      */
     ConnectionSession(boost::asio::ip::tcp::socket socket,
+                      Direction direction,
                       std::uint64_t connectionId, std::function<void()> onClosed,
                       std::function<void(const std::string&)> onHello);
     /**
      * @brief Sends the local device ID in Hello and starts the asynchronous read loop.
-     * @throws std::runtime_error If a newly generated device ID cannot be persisted.
+     * @param deviceId Local device ID sent to the remote peer.
      * @note Call once on an open session already owned by a shared_ptr.
      */
-    void start();
+    void start(const std::string& deviceId);
     /**
      * @brief Records the remote ID and invokes the manager's Hello callback once.
      * @param peerId Device ID decoded from the received Hello payload.
@@ -74,6 +96,14 @@ public:
      */
     std::uint64_t connectionId() const { return connectionId_; }
     /**
+     * @brief Returns whether this computer accepted or initiated the connection.
+     */
+    Direction direction() const { return direction_; }
+    // Inspect only on the network thread, like the other session methods.
+    bool isOpen() const { return !closed_ && socket_.is_open(); }
+    boost::asio::ip::tcp::endpoint localEndpoint() const { return socket_.local_endpoint(); }
+    boost::asio::ip::tcp::endpoint remoteEndpoint() const { return socket_.remote_endpoint(); }
+    /**
      * @brief Encodes and queues a message for asynchronous transmission in FIFO order.
      * @param message Message whose payload bytes are copied into the outgoing frame.
      *
@@ -81,6 +111,14 @@ public:
      * larger than 1 MiB closes the session. Returning does not mean the write completed.
      */
     void send(Message message);
+    // Takes ownership. Throws for null transfers, duplicate IDs, or a closed session.
+    // Call on the network thread. The returned reference lasts until the transfer is removed
+    // or this session is destroyed.
+    FileTransfer& addFileTransfer(std::uint64_t requestId, std::unique_ptr<FileTransfer> transfer);
+    // Removes a finished/failed transfer. Cancel active transfers before removal.
+    void removeFileTransfer(std::uint64_t requestId);
+    // Returns a borrowed pointer, or nullptr for an unknown request ID. Network thread only.
+    FileTransfer* findFileTransfer(std::uint64_t requestId);
     /**
      * @brief Closes the socket, clears queued frames, and notifies the manager once.
      *
@@ -132,12 +170,14 @@ private:
 
     boost::asio::ip::tcp::socket socket_;
     std::uint64_t connectionId_;
+    Direction direction_;
     std::function<void()> onClosed_;
     std::function<void(const std::string&)> onHello_;
     std::string peerId_;
     bool closed_ = false;
     std::array<std::uint8_t, HeaderSize> readHeader_{};
     std::vector<std::uint8_t> readBuffer_;
+    std::unordered_map<std::uint64_t, std::unique_ptr<FileTransfer>> transfers_;
     // Front is the active write. Empty -> nonempty starts the first write.
     std::deque<std::shared_ptr<std::vector<std::uint8_t>>> writeQueue_;
 };
