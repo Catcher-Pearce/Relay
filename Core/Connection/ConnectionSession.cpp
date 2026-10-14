@@ -63,7 +63,8 @@ void ConnectionSession::readHeader() {
                 return;
             }
             const auto rawType = self->readHeader_[0];
-            if (rawType > static_cast<std::uint8_t>(MessageType::FileTransferError)) {
+            // Wire values 6 and 9 are retired and must not be accepted.
+            if (rawType == 6 || rawType == 9 || rawType > static_cast<std::uint8_t>(MessageType::FileTransferError)) {
                 self->finish(boost::asio::error::invalid_argument);
                 return;
             }
@@ -103,7 +104,7 @@ void ConnectionSession::readBody(MessageType type, std::uint64_t requestId, std:
         });
 }
 
-void ConnectionSession::send(Message message) {
+void ConnectionSession::send(Message message, std::function<void(ConnectionSession&)> onWritten) {
     if (closed_) {
         return;
     }
@@ -121,18 +122,20 @@ void ConnectionSession::send(Message message) {
         (*frame)[9 + i] = static_cast<std::uint8_t>(length >> (24 - 8 * i));
     }
     frame->insert(frame->end(), message.payload.begin(), message.payload.end());
-    const bool idle = writeQueue_.empty();
-    writeQueue_.push_back(std::move(frame));
-    if (idle) {
+    writeQueue_.push_back({std::move(frame), std::move(onWritten)});
+    if (!writeInProgress_) {
         writeNext();
     }
 }
 
 void ConnectionSession::writeNext() {
+    if (closed_ || writeInProgress_ || writeQueue_.empty()) return;
+    writeInProgress_ = true;
     auto self = shared_from_this();
-    auto frame = writeQueue_.front();
+    auto frame = writeQueue_.front().frame;
+    auto onWritten = writeQueue_.front().onWritten;
     boost::asio::async_write(socket_, boost::asio::buffer(*frame),
-        [self, frame](boost::system::error_code error, std::size_t) {
+        [self, frame, onWritten](boost::system::error_code error, std::size_t) {
             // The captured frame stays alive even if close() clears the queue.
             if (self->closed_) {
                 return;
@@ -142,9 +145,21 @@ void ConnectionSession::writeNext() {
                 return;
             }
             self->writeQueue_.pop_front();
-            if (!self->writeQueue_.empty()) {
-                self->writeNext();
+
+            // Keep the guard set: send() called by onWritten must only enqueue.
+            try {
+                if (onWritten) onWritten(*self);
+            } catch (const std::exception& exception) {
+                std::cerr << "Write callback failed: " << exception.what() << std::endl;
+                self->finish(boost::asio::error::operation_aborted);
+                return;
+            } catch (...) {
+                self->finish(boost::asio::error::operation_aborted);
+                return;
             }
+
+            self->writeInProgress_ = false;
+            self->writeNext();
         });
 }
 
@@ -160,6 +175,7 @@ void ConnectionSession::finish(boost::system::error_code error) {
     boost::system::error_code ignored;
     socket_.close(ignored);
     writeQueue_.clear();
+    writeInProgress_ = false;
     std::cout << "Connection " << connectionId_ << " closed" << std::endl;
     if (error && error != boost::asio::error::eof &&
         error != boost::asio::error::operation_aborted) {

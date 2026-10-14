@@ -11,8 +11,7 @@ namespace relay {
  * replying. Hello decodes the payload as a peer ID and calls identifyPeer(), which
  * notifies the manager. Hello does not trigger another Hello response.
  * Filesystem requests return a JSON listing. File requests start sending a file;
- * transfer-start messages begin a download, and chunk acknowledgments advance
- * outgoing transfers. Message types without a handler are currently ignored.
+ * transfer-start messages begin a download. Message types without a handler are currently ignored.
  * @note Called on the network thread after frame and greeting-order validation.
  */
 void handleMessage(ConnectionSession& session, ConnectionSession::Message message);

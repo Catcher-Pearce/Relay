@@ -68,35 +68,6 @@ void handleFileRequest(ConnectionSession& session, ConnectionSession::Message& m
     }
 }
 
-void handleFileChunkAck(ConnectionSession& session, ConnectionSession::Message& message) {
-    auto* transfer = session.findFileTransfer(message.requestId);
-    try {
-        if (!transfer) throw std::invalid_argument("Unknown transfer ID in chunk acknowledgment");
-        if (message.payload.size() != 8) {
-            throw std::invalid_argument("Chunk acknowledgment must contain an 8-byte offset");
-        }
-        std::uint64_t offset = 0;
-        for (const auto byte : message.payload) offset = (offset << 8) | byte;
-        if (transfer->state() != FileTransfer::State::Sending ||
-            transfer->transferId() != message.requestId ||
-            offset != transfer->bytesTransferred()) {
-            throw std::invalid_argument("Chunk acknowledgment does not match the outgoing transfer");
-        }
-        transfer->sendNextChunk();
-        if (transfer->state() == FileTransfer::State::Completed) {
-            session.removeFileTransfer(message.requestId);
-        }
-    } catch (const std::exception& error) {
-        if (transfer && transfer->state() == FileTransfer::State::Failed) {
-            session.removeFileTransfer(message.requestId);
-        }
-        const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
-            .toJson(QJsonDocument::Compact);
-        session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
-                      {json.begin(), json.end()}});
-    }
-}
-
 void handleFileTransferStart(ConnectionSession& session, ConnectionSession::Message& message) {
     bool registered = false;
     try {
@@ -136,6 +107,104 @@ void handleFileTransferStart(ConnectionSession& session, ConnectionSession::Mess
     }
 }
 
+void handleFileChunk(ConnectionSession& session, const ConnectionSession::Message& message) {
+    auto* transfer = session.findFileTransfer(message.requestId);
+    try {
+        if (!transfer) throw std::invalid_argument("Unknown transfer ID in file chunk");
+        if (transfer->state() != FileTransfer::State::Receiving) {
+            throw std::invalid_argument("File chunk does not belong to an active incoming transfer");
+        }
+        constexpr std::size_t OffsetSize = 8;
+        if (message.payload.size() <= OffsetSize ||
+            message.payload.size() > OffsetSize + FileTransfer::ChunkSize) {
+            throw std::invalid_argument("File chunk must contain an 8-byte offset and 1 to 65536 data bytes");
+        }
+        std::uint64_t offset = 0;
+        for (std::size_t i = 0; i < OffsetSize; ++i) {
+            offset = (offset << 8) | message.payload[i];
+        }
+        const auto data = std::span<const std::uint8_t>(message.payload).subspan(OffsetSize);
+        // receiveChunk checks the ID, sequential offset, and remaining file size.
+        transfer->receiveChunk(message.requestId, offset, data);
+    } catch (const std::exception& error) {
+        // Invalid messages leave the existing transfer unchanged. Disk/session
+        // failures mark it Failed; clean up that transfer before removing ownership.
+        if (transfer && transfer->state() == FileTransfer::State::Failed) {
+            try {
+                transfer->cancel(false);
+                session.removeFileTransfer(message.requestId);
+            } catch (const std::exception& cleanupError) {
+                // Retain the failed transfer so its owned temporary file can be retried.
+                std::cerr << "Transfer cleanup failed: " << cleanupError.what() << std::endl;
+            }
+        }
+        const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
+            .toJson(QJsonDocument::Compact);
+        session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
+                      {json.begin(), json.end()}});
+    }
+}
+
+void handleFileTransferComplete(ConnectionSession& session, const ConnectionSession::Message& message) {
+    auto* transfer = session.findFileTransfer(message.requestId);
+    try {
+        if (!message.payload.empty()) throw std::invalid_argument("Transfer complete message must have empty payload");
+
+        if (!transfer) throw std::invalid_argument("Unknown transfer ID in file transfer complete message");
+
+        transfer->finishReceive(message.requestId);
+
+        session.removeFileTransfer(message.requestId);
+        transfer = nullptr;
+
+        std::cout << "Download finished, transfer " << message.requestId << std::endl;
+    } catch (const std::exception& error) {
+        if (transfer && transfer->state() == FileTransfer::State::Failed) {
+            try {
+                transfer->cancel(false);
+                session.removeFileTransfer(message.requestId);
+            } catch (const std::exception& cleanupError) {
+                std::cerr << "Transfer cleanup failed: " << cleanupError.what() << std::endl;
+            }
+        }
+        const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
+            .toJson(QJsonDocument::Compact);
+        session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
+                      {json.begin(), json.end()}});
+    }
+}
+
+
+void handleFileTransferError(ConnectionSession& session, const ConnectionSession::Message& message) {
+    try {
+        const QByteArray payload(reinterpret_cast<const char*>(message.payload.data()),
+                                 static_cast<qsizetype>(message.payload.size()));
+        QJsonParseError parseError;
+        const auto document = QJsonDocument::fromJson(payload, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+            throw std::invalid_argument("Transfer error must be a valid JSON object");
+        }
+        const auto error = document.object().value("error");
+        if (!error.isString() || error.toString().isEmpty()) {
+            throw std::invalid_argument("Transfer error must contain a nonempty error string");
+        }
+        std::cerr << "Peer reported an error for transfer " << message.requestId
+                  << ": " << error.toString().toStdString() << std::endl;
+
+        if (auto* transfer = session.findFileTransfer(message.requestId)) {
+            // Never reply to an error with another error: that could cause a loop.
+            transfer->cancel(false);
+            session.removeFileTransfer(message.requestId);
+        }
+        // Unknown IDs can occur after local cleanup; logging the peer's error is enough.
+    } catch (const std::exception& error) {
+        // Malformed messages leave transfers unchanged. If cleanup throws, retain
+        // the failed transfer and its temporary-file ownership so cleanup can be retried.
+        std::cerr << "Could not handle error for transfer " << message.requestId
+                  << ": " << error.what() << std::endl;
+    }
+}
+
 } // namespace
 
 void handleMessage(ConnectionSession& session, ConnectionSession::Message message) {
@@ -158,11 +227,17 @@ void handleMessage(ConnectionSession& session, ConnectionSession::Message messag
     case ConnectionSession::MessageType::FileRequest:
         handleFileRequest(session, message);
         break;
-    case ConnectionSession::MessageType::FileChunkAck:
-        handleFileChunkAck(session, message);
-        break;
     case ConnectionSession::MessageType::FileTransferStart:
         handleFileTransferStart(session, message);
+        break;
+    case ConnectionSession::MessageType::FileChunk:
+        handleFileChunk(session, message);
+        break;
+    case ConnectionSession::MessageType::FileTransferComplete:
+        handleFileTransferComplete(session, message);
+        break;
+    case ConnectionSession::MessageType::FileTransferError:
+        handleFileTransferError(session, message);
         break;
     default:
         break;

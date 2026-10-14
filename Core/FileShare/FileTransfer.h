@@ -17,17 +17,15 @@ class ConnectionSession;
  * transfer alive for every operation and call all methods on the network thread.
  * File reads, writes, and flushes are synchronous on that thread.
  *
- * Sending: sendFile() queues metadata and the first chunk. For each FileChunkAck,
- * the handler verifies its ID and offset, then calls sendNextChunk(). The last
- * acknowledgment causes FileTransferComplete to be queued. Receiving:
- * beginReceive() opens a .part file, receiveChunk() appends and acknowledges each
- * chunk, and finishReceive() renames the file after FileTransferComplete arrives.
- * This class does not parse frames or schedule the next chunk automatically.
+ * Sending: sendFile() queues metadata and the first chunk. Automatic advancement
+ * from socket write completion is a TODO; call sendNextChunk() manually until
+ * that callback is implemented. Receiving: beginReceive() opens a .part file,
+ * receiveChunk() appends each chunk, and finishReceive() renames the completed file.
+ * This class does not parse frames. There are no application-level chunk acknowledgments.
  *
  * Wire format (the frame request ID is always the transfer ID):
  * - FileTransferStart: UTF-8 JSON with relative "path" and byte "size" fields.
  * - FileChunk: 8-byte big-endian offset followed by up to ChunkSize raw bytes.
- * - FileChunkAck: 8-byte big-endian next expected offset.
  * - FileTransferComplete: empty payload.
  * - Cancellation: FileTransferError with a UTF-8 JSON "error" field.
  *
@@ -39,11 +37,11 @@ class ConnectionSession;
  */
 class FileTransfer {
 public:
-    /// Session-scoped request ID used to correlate metadata, chunks, and acknowledgments.
+    /// Session-scoped request ID used to correlate metadata and chunks.
     using TransferId = std::uint64_t;
     enum class State {
         Idle,       ///< No transfer has started.
-        Sending,    ///< Source is open; chunks are queued as acknowledgments arrive.
+        Sending,    ///< Source is open; chunks await socket-write completion callbacks.
         Receiving,  ///< Temporary destination is open, including while awaiting completion.
         Completed,  ///< Sender queued completion, or receiver finalized its file.
         Cancelled,  ///< Explicit cleanup succeeded; completed files are preserved.
@@ -77,11 +75,12 @@ public:
     void sendFile(TransferId id, const std::filesystem::path& relativePath);
     /**
      * @brief Queues one chunk, or completion if all source bytes were already queued.
-     * @pre State is Sending. Caller has validated the previous chunk's acknowledgment.
+     * @pre State is Sending. The previous chunk's socket write has completed.
      *
-     * Call once per acknowledgment, including the final one. This method does not
-     * validate acknowledgments itself. Completion means queued locally; it does
-     * not confirm that the receiver has finalized its file.
+     * TODO: Invoke from a per-frame write-completion callback, including after the
+     * final chunk. Until wired, callers advance manually. Do not call in an unbounded
+     * loop because send() queues bytes in memory. Completion means queued locally;
+     * it does not confirm that the receiver has finalized its file.
      * @throws std::logic_error If no outgoing transfer is active.
      * @throws std::runtime_error On disconnected sessions or incomplete reads;
      * these errors close the source and set Failed.
@@ -102,14 +101,14 @@ public:
     void beginReceive(TransferId id, const std::filesystem::path& relativePath,
                       std::uint64_t expectedSize);
     /**
-     * @brief Appends a validated chunk and acknowledges the next expected offset.
+     * @brief Appends a validated chunk and updates local progress.
      * @param id Must match the active incoming transfer ID.
      * @param offset Must equal bytesTransferred(); out-of-order/duplicate chunks are rejected.
      * @param data Raw file bytes, excluding the wire payload's 8-byte offset prefix.
      * Must contain 1 through ChunkSize bytes and fit within the remaining size.
      * The span is consumed synchronously and is not retained.
      *
-     * Flushes before acknowledging; a stream flush is not a guarantee of durable
+     * Flushes after writing; a stream flush is not a guarantee of durable
      * disk storage. Remains Receiving after the last chunk until finishReceive().
      * @throws std::logic_error If no incoming transfer is active.
      * @throws std::invalid_argument On ID, offset, or size mismatch, without writing.
@@ -133,6 +132,7 @@ public:
     void finishReceive(TransferId id);
     /**
      * @brief Closes streams and removes only a temporary file owned by this transfer.
+     * @param notifyPeer False for local cleanup when the caller sends its own error response.
      *
      * Sets Cancelled and queues FileTransferError when cancelling an active transfer
      * or owned temporary download, provided the session is still open. A disconnected
@@ -141,7 +141,7 @@ public:
      * @throws std::filesystem::filesystem_error If temporary-file removal fails;
      * state becomes Failed and cleanup can be retried.
      */
-    void cancel();
+    void cancel(bool notifyPeer = true);
 
     /// Current local lifecycle state; not a statement of remote completion.
     State state() const { return state_; }

@@ -41,10 +41,8 @@ public:
         FileSystemRequest = 3,
         FileSystemResponse = 4,
         FileRequest = 5,
-        FileResponse = 6,
         FileTransferStart = 7,
         FileChunk = 8,
-        FileChunkAck = 9,
         FileTransferComplete = 10,
         FileTransferError = 11
     };
@@ -58,6 +56,11 @@ public:
         MessageType type;
         std::uint64_t requestId = 0;
         std::vector<std::uint8_t> payload;
+    };
+
+    struct PendingWrite {
+        std::shared_ptr<std::vector<std::uint8_t>> frame;
+        std::function<void(ConnectionSession&)> onWritten;
     };
 
     /**
@@ -106,11 +109,13 @@ public:
     /**
      * @brief Encodes and queues a message for asynchronous transmission in FIFO order.
      * @param message Message whose payload bytes are copied into the outgoing frame.
+     * @param onWritten Optional success callback, called once with this session after
+     * the frame is written. Discarded on failure/close; thrown exceptions close the session.
      *
      * Starts a write if the queue was idle. Calls after close are ignored; a payload
      * larger than 1 MiB closes the session. Returning does not mean the write completed.
      */
-    void send(Message message);
+    void send(Message message, std::function<void(ConnectionSession&)> onWritten = {});
     // Takes ownership. Throws for null transfers, duplicate IDs, or a closed session.
     // Call on the network thread. The returned reference lasts until the transfer is removed
     // or this session is destroyed.
@@ -178,6 +183,8 @@ private:
     std::array<std::uint8_t, HeaderSize> readHeader_{};
     std::vector<std::uint8_t> readBuffer_;
     std::unordered_map<std::uint64_t, std::unique_ptr<FileTransfer>> transfers_;
-    // Front is the active write. Empty -> nonempty starts the first write.
-    std::deque<std::shared_ptr<std::vector<std::uint8_t>>> writeQueue_;
+    // Front is the active frame; writeInProgress_ controls when a new write starts.
+    std::deque<PendingWrite> writeQueue_;
+    // Remains true while a completion callback runs, so send() only queues new frames.
+    bool writeInProgress_ = false;
 };

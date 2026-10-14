@@ -57,6 +57,22 @@ int main() {
         catch (const std::invalid_argument&) { nullRejected = true; }
         require(nullRejected, "Null transfer was accepted");
         auto flush = [&] { context.restart(); context.run(); };
+        int callbackCount = 0;
+        session->send({ConnectionSession::MessageType::Ping, 100, {}}, [&](ConnectionSession& current) {
+            ++callbackCount;
+            current.send({ConnectionSession::MessageType::Ping, 102, {}}, [&](ConnectionSession&) {
+                ++callbackCount;
+            });
+        });
+        session->send({ConnectionSession::MessageType::Ping, 101, {}}, [&](ConnectionSession&) {
+            ++callbackCount;
+        });
+        require(callbackCount == 0, "Write callback fired before the socket write");
+        flush();
+        require(callbackCount == 3, "Write callbacks must run exactly once");
+        for (const auto id : {100, 101, 102}) {
+            require(readFrame(receiver).requestId == id, "Callback queueing changed frame order");
+        }
         for (const auto& invalidPath : {std::vector<std::uint8_t>{}, std::vector<std::uint8_t>{'a', 0, 'b'}}) {
             relay::handleMessage(*session, {ConnectionSession::MessageType::FileRequest, 99, invalidPath});
             flush();
@@ -76,6 +92,9 @@ int main() {
             require(session->findFileTransfer(42) == &transfer, "Rejected start replaced existing transfer");
         }
         transfer.sendFile(42, "nested/file.bin");
+        bool busy = false;
+        try { transfer.sendFile(43, "empty.bin"); } catch (const std::logic_error&) { busy = true; }
+        require(busy && transfer.state() == FileTransfer::State::Sending, "Active transfer must not be overwritten");
         flush();
         auto metadata = readFrame(receiver);
         require(metadata.type == ConnectionSession::MessageType::FileTransferStart && metadata.requestId == 42,
@@ -83,41 +102,22 @@ int main() {
         const auto object = QJsonDocument::fromJson(QByteArray(
             reinterpret_cast<const char*>(metadata.payload.data()), metadata.payload.size())).object();
         require(object["path"] == "nested/file.bin" && object["size"].toInteger() == contents.size(), "Wrong metadata");
-        bool busy = false;
-        try { transfer.sendFile(43, "empty.bin"); } catch (const std::logic_error&) { busy = true; }
-        require(busy && transfer.state() == FileTransfer::State::Sending, "Active transfer must not be overwritten");
         std::string received;
         for (int chunkIndex = 0; chunkIndex < 2; ++chunkIndex) {
             const auto chunk = readFrame(receiver);
-            if (chunkIndex == 0) {
-        for (auto badAck : {ConnectionSession::Message{ConnectionSession::MessageType::FileChunkAck, 999, std::vector<std::uint8_t>(8)},
-                            ConnectionSession::Message{ConnectionSession::MessageType::FileChunkAck, 42, {}},
-                            ConnectionSession::Message{ConnectionSession::MessageType::FileChunkAck, 42, std::vector<std::uint8_t>(8)}}) {
-            const auto id = badAck.requestId;
-            relay::handleMessage(*session, std::move(badAck)); flush();
-            require(readFrame(receiver).requestId == id, "Invalid acknowledgment must return an error");
-            require(session->findFileTransfer(42) == &transfer && transfer.bytesTransferred() == FileTransfer::ChunkSize,
-                    "Invalid acknowledgment advanced or removed the transfer");
-        }
-            }
             require(chunk.type == ConnectionSession::MessageType::FileChunk && chunk.requestId == 42,
                     "Wrong chunk frame");
             std::uint64_t offset = 0;
             for (int i = 0; i < 8; ++i) offset = (offset << 8) | chunk.payload.at(i);
             require(offset == received.size(), "Wrong chunk offset");
             received.append(reinterpret_cast<const char*>(chunk.payload.data() + 8), chunk.payload.size() - 8);
-            std::vector<std::uint8_t> ackPayload(8);
-            const auto nextOffset = static_cast<std::uint64_t>(received.size());
-            for (std::size_t i = 0; i < 8; ++i) {
-                ackPayload[i] = static_cast<std::uint8_t>(nextOffset >> (56 - 8 * i));
-            }
-            relay::handleMessage(*session, {ConnectionSession::MessageType::FileChunkAck, 42, std::move(ackPayload)});
-            flush();
         }
         require(received == contents, "Binary data changed in transit");
         require(readFrame(receiver).type == ConnectionSession::MessageType::FileTransferComplete,
                 "Missing completion frame");
-        require(session->findFileTransfer(42) == nullptr, "Completed transfer must be removed");
+        require(transfer.state() == FileTransfer::State::Completed, "Transfer did not queue completion");
+        // TODO: Move this removal to the completion frame's write callback.
+        session->removeFileTransfer(42);
         auto& emptyTransfer = session->addFileTransfer(43,
             std::make_unique<FileTransfer>(session, shared, base / "downloads"));
         emptyTransfer.sendFile(43, "empty.bin"); flush();
@@ -131,7 +131,7 @@ int main() {
         }
         const auto downloads = base / "downloads";
         std::filesystem::create_directory(downloads);
-        FileTransfer incoming(session, shared, downloads);
+        auto& incoming = session->addFileTransfer(90, std::make_unique<FileTransfer>(session, shared, downloads));
         const std::span<const std::uint8_t> bytes(
             reinterpret_cast<const std::uint8_t*>(contents.data()), contents.size());
         bool idleRejected = false;
@@ -139,6 +139,26 @@ int main() {
         catch (const std::logic_error&) { idleRejected = true; }
         require(idleRejected, "Idle receiver must reject chunks");
         incoming.beginReceive(90, "nested/download.bin", contents.size());
+        for (const auto& payload : {std::vector<std::uint8_t>{}, std::vector<std::uint8_t>(7),
+                std::vector<std::uint8_t>(8), std::vector<std::uint8_t>(9 + FileTransfer::ChunkSize)}) {
+            relay::handleMessage(*session, {ConnectionSession::MessageType::FileChunk, 90, payload}); flush();
+            const auto error = readFrame(receiver);
+            require(error.type == ConnectionSession::MessageType::FileTransferError && error.requestId == 90,
+                    "Malformed chunk must return an error");
+            require(incoming.bytesTransferred() == 0, "Malformed chunk wrote file data");
+        }
+        relay::handleMessage(*session, {ConnectionSession::MessageType::FileChunk, 999, std::vector<std::uint8_t>(9)});
+        flush();
+        require(readFrame(receiver).requestId == 999, "Unknown chunk ID must return an error");
+        auto deliver = [&](std::uint64_t offset, std::span<const std::uint8_t> data) {
+            std::vector<std::uint8_t> payload(8);
+            for (std::size_t i = 0; i < 8; ++i) payload[i] = static_cast<std::uint8_t>(offset >> (56 - 8 * i));
+            payload.insert(payload.end(), data.begin(), data.end());
+            relay::handleMessage(*session, {ConnectionSession::MessageType::FileChunk, 90, std::move(payload)});
+        };
+        deliver(1, bytes.first(1)); flush();
+        require(readFrame(receiver).type == ConnectionSession::MessageType::FileTransferError &&
+                incoming.bytesTransferred() == 0, "Out-of-order chunk must not write data");
         auto rejectChunk = [&](std::uint64_t id, std::uint64_t offset,
                                std::span<const std::uint8_t> data) {
             bool rejected = false;
@@ -150,26 +170,17 @@ int main() {
         rejectChunk(90, 1, bytes.first(1));
         rejectChunk(90, 0, {});
         rejectChunk(90, 0, bytes);
-        incoming.receiveChunk(90, 0, bytes.first(FileTransfer::ChunkSize));
+        deliver(0, bytes.first(FileTransfer::ChunkSize));
         flush();
-        auto ack = readFrame(receiver);
-        require(ack.type == ConnectionSession::MessageType::FileChunkAck && ack.requestId == 90,
-                "Missing chunk acknowledgement");
-        auto ackOffset = [](const ConnectionSession::Message& message) {
-            require(message.payload.size() == 8, "Ack must contain an offset");
-            std::uint64_t value = 0;
-            for (auto byte : message.payload) value = (value << 8) | byte;
-            return value;
-        };
-        require(ackOffset(ack) == FileTransfer::ChunkSize, "Wrong acknowledged offset");
+        require(receiver.available() == 0, "Receiving a chunk must not send an acknowledgment");
         bool oversized = false;
         try { incoming.receiveChunk(90, FileTransfer::ChunkSize, bytes.first(4)); }
         catch (const std::invalid_argument&) { oversized = true; }
         require(oversized && incoming.bytesTransferred() == FileTransfer::ChunkSize,
                 "Chunk exceeded remaining file size");
-        incoming.receiveChunk(90, FileTransfer::ChunkSize, bytes.last(3));
+        deliver(FileTransfer::ChunkSize, bytes.last(3));
         flush();
-        require(ackOffset(readFrame(receiver)) == contents.size(), "Wrong final acknowledgment");
+        require(receiver.available() == 0, "Final chunk must not send an acknowledgment");
         require(incoming.state() == FileTransfer::State::Receiving, "Must wait for completion message");
         std::ifstream downloaded(downloads / "nested" / "download.bin.part", std::ios::binary);
         const std::string saved((std::istreambuf_iterator<char>(downloaded)), {});
@@ -186,6 +197,26 @@ int main() {
         incoming.cancel(); incoming.cancel();
         require(std::filesystem::exists(downloads / "nested/download.bin"), "Cancel deleted completed download");
 
+        auto& completeHandlerTransfer = session->addFileTransfer(300,
+            std::make_unique<FileTransfer>(session, shared, downloads));
+        completeHandlerTransfer.beginReceive(300, "handler-empty.bin", 0);
+        relay::handleMessage(*session, {ConnectionSession::MessageType::FileTransferComplete, 300, {1}});
+        flush();
+        require(readFrame(receiver).type == ConnectionSession::MessageType::FileTransferError &&
+                session->findFileTransfer(300) != nullptr, "Malformed completion removed the transfer");
+        relay::handleMessage(*session, {ConnectionSession::MessageType::FileTransferComplete, 300, {}});
+        require(session->findFileTransfer(300) == nullptr && std::filesystem::exists(downloads / "handler-empty.bin"),
+                "Completion handler did not finalize the file");
+        relay::handleMessage(*session, {ConnectionSession::MessageType::FileTransferComplete, 301, {}});
+        flush();
+        require(readFrame(receiver).requestId == 301, "Unknown completion ID did not return an error");
+        auto& premature = session->addFileTransfer(302,
+            std::make_unique<FileTransfer>(session, shared, downloads));
+        premature.beginReceive(302, "premature.bin", 5);
+        relay::handleMessage(*session, {ConnectionSession::MessageType::FileTransferComplete, 302, {}});
+        flush();
+        require(readFrame(receiver).requestId == 302 && session->findFileTransfer(302) == nullptr &&
+                !std::filesystem::exists(downloads / "premature.bin.part"), "Failed completion did not clean up");
         FileTransfer emptyIncoming(session, shared, downloads);
         emptyIncoming.beginReceive(93, "empty.bin", 0);
         emptyIncoming.finishReceive(93);
@@ -228,6 +259,24 @@ int main() {
         require(readFrame(receiver).type == ConnectionSession::MessageType::FileTransferError &&
                 outgoingCancelled.state() == FileTransfer::State::Cancelled, "Outgoing cancellation failed");
         require(std::filesystem::file_size(shared / "nested/file.bin") == contents.size(), "Cancel modified source file");
+        auto& peerCancelled = session->addFileTransfer(400,
+            std::make_unique<FileTransfer>(session, shared, downloads));
+        peerCancelled.beginReceive(400, "peer-cancelled.bin", 1);
+        for (const std::string invalidError : {"not-json", "[]", "{}", "{\"error\":0}", "{\"error\":\"\"}"}) {
+            relay::handleMessage(*session, {ConnectionSession::MessageType::FileTransferError, 400,
+                                           {invalidError.begin(), invalidError.end()}});
+            require(session->findFileTransfer(400) == &peerCancelled &&
+                    peerCancelled.state() == FileTransfer::State::Receiving, "Malformed error cancelled transfer");
+        }
+        const std::string remoteError = "{\"error\":\"Source file unavailable\"}";
+        for (const auto id : {400, 400, 999}) {
+            relay::handleMessage(*session, {ConnectionSession::MessageType::FileTransferError,
+                                           static_cast<std::uint64_t>(id), {remoteError.begin(), remoteError.end()}});
+        }
+        flush();
+        require(session->findFileTransfer(400) == nullptr &&
+                !std::filesystem::exists(downloads / "peer-cancelled.bin.part"), "Peer error did not clean up download");
+        require(receiver.available() == 0, "Error handler must not send an error response");
         FileTransfer interrupted(session, shared, downloads);
         interrupted.beginReceive(92, "interrupted.bin", 1);
         session->close();

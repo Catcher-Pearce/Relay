@@ -80,7 +80,7 @@ void FileTransfer::sendNextChunk() {
             throw std::runtime_error("The transfer session is disconnected");
         }
         if (bytesTransferred_ == totalBytes_) {
-            // Called after the final chunk is acknowledged, or immediately for an empty file.
+            // TODO: Call after the final chunk write completes, or immediately for an empty file.
             session->send({ConnectionSession::MessageType::FileTransferComplete, transferId_, {}});
             source_.close();
             state_ = State::Completed;
@@ -99,7 +99,15 @@ void FileTransfer::sendNextChunk() {
         if (source_.gcount() != static_cast<std::streamsize>(count) || source_.bad()) {
             throw std::runtime_error("Could not read the complete chunk; the file may have changed");
         }
-        session->send({ConnectionSession::MessageType::FileChunk, transferId_, std::move(payload)});
+        // TODO: Attach a write-completion callback. Capture a weak session plus the
+        // transfer ID, look the transfer up again, verify it is still Sending, and
+        // call sendNextChunk(). Do not capture a raw FileTransfer pointer.
+        session->send({ConnectionSession::MessageType::FileChunk, transferId_, std::move(payload)}, [id = transferId_](ConnectionSession& session) {
+    auto* transfer = session.findFileTransfer(id);
+    if (transfer && transfer->state() == State::Sending) {
+        transfer->sendNextChunk();
+    }
+});
         bytesTransferred_ += count;
     } catch (...) {
         source_.close();
@@ -209,19 +217,12 @@ void FileTransfer::receiveChunk(TransferId id, std::uint64_t offset,
         }
         destination_.write(reinterpret_cast<const char*>(data.data()),
                            static_cast<std::streamsize>(data.size()));
-        // Detect buffered write failures before acknowledging the chunk.
+        // Detect buffered write failures before updating progress.
         destination_.flush();
         if (!destination_) {
             throw std::runtime_error("Could not write the complete chunk to the download file");
         }
         bytesTransferred_ += data.size();
-        // Ack payload: next expected offset, encoded as 8 big-endian bytes.
-        std::vector<std::uint8_t> acknowledgment(8);
-        for (std::size_t i = 0; i < 8; ++i) {
-            acknowledgment[i] = static_cast<std::uint8_t>(bytesTransferred_ >> (56 - 8 * i));
-        }
-        session->send({ConnectionSession::MessageType::FileChunkAck, transferId_,
-                       std::move(acknowledgment)});
         // Stay Receiving until FileTransferComplete verifies and finalizes the file.
     } catch (...) {
         destination_.close();
@@ -272,9 +273,10 @@ void FileTransfer::finishReceive(TransferId id) {
     }
 }
 
-void FileTransfer::cancel() {
+void FileTransfer::cancel(bool notifyPeer) {
     if (state_ == State::Cancelled || state_ == State::Completed) return;
-    const bool notifyPeer = state_ == State::Sending || state_ == State::Receiving || ownsTemporaryFile_;
+    const bool shouldNotify = notifyPeer &&
+        (state_ == State::Sending || state_ == State::Receiving || ownsTemporaryFile_);
     if (source_.is_open()) source_.close();
     if (destination_.is_open()) destination_.close();
     source_.clear();
@@ -291,7 +293,7 @@ void FileTransfer::cancel() {
         throw;
     }
     state_ = State::Cancelled;
-    if (notifyPeer) {
+    if (shouldNotify) {
         if (auto session = session_.lock(); session && session->isOpen()) {
             const auto error = QJsonDocument(QJsonObject{{"error", "Transfer cancelled"}})
                 .toJson(QJsonDocument::Compact);

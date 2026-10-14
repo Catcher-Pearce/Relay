@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <sstream>
+#include <iomanip>
 
 namespace {
 unsigned short parsePort(const std::string& text) {
@@ -20,16 +21,23 @@ unsigned short parsePort(const std::string& text) {
 }
 
 void commandLoop(ConnectionManager& manager) {
-    const auto help = "Commands: ping [PEER_ID], files [PEER_ID], peers, help, quit\n";
+    const auto help = "Commands: ping [PEER_ID], files [PEER_ID], download \"PATH\" [PEER_ID], peers, help, quit\n";
     std::cout << help;
     std::uint64_t requestId = 1;
     std::string line;
     while (std::cout << "relay> " << std::flush, std::getline(std::cin, line)) {
         std::istringstream input(line);
-        std::string command, peerId, extra;
-        input >> command >> peerId >> extra;
+        std::string command, peerId, extra, path;
+        input >> command;
         if (command.empty()) continue;
-        if (!extra.empty() || (!peerId.empty() && command != "ping" && command != "files")) {
+        if (command == "download") {
+            if (!(input >> std::quoted(path)) || path.empty() || path.find('\0') != std::string::npos) {
+                std::cout << "Usage: download \"PATH\" [PEER_ID]\n";
+                continue;
+            }
+        }
+        input >> peerId >> extra;
+        if (!extra.empty() || (!peerId.empty() && command != "ping" && command != "files" && command != "download")) {
             std::cout << help;
             continue;
         }
@@ -38,7 +46,7 @@ void commandLoop(ConnectionManager& manager) {
             std::cout << help;
             continue;
         }
-        if (command != "ping" && command != "files" && command != "peers") {
+        if (command != "ping" && command != "files" && command != "download" && command != "peers") {
             std::cout << "Unknown command. " << help;
             continue;
         }
@@ -60,8 +68,11 @@ void commandLoop(ConnectionManager& manager) {
         }
         const auto id = requestId++;
         const auto type = command == "ping" ? ConnectionSession::MessageType::Ping
-                                             : ConnectionSession::MessageType::FileSystemRequest;
-        if (manager.sendMessage(peerId, {type, id, {}}).get()) {
+                        : command == "download" ? ConnectionSession::MessageType::FileRequest
+                                                : ConnectionSession::MessageType::FileSystemRequest;
+        std::vector<std::uint8_t> payload;
+        if (command == "download") payload.assign(path.begin(), path.end());
+        if (manager.sendMessage(peerId, {type, id, std::move(payload)}).get()) {
             std::cout << "Sent " << command << ", request " << id << " to " << peerId << std::endl;
         } else {
             std::cout << "Peer is not connected: " << peerId << std::endl;
