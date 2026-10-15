@@ -61,16 +61,25 @@ void ConnectionManager::addConnection(std::uint64_t connectionId, const std::str
 
     auto session = pending->second;
 
-    const auto& localId = deviceId_;
-    const auto direction = session->direction();
+    const auto preferred = peerId > deviceId_
+    ? ConnectionSession::Direction::Incoming
+    : ConnectionSession::Direction::Outgoing;
 
-    if ((peerId > localId &&
-         direction == ConnectionSession::Direction::Outgoing) ||
-        (peerId < localId &&
-         direction == ConnectionSession::Direction::Incoming)) {
-        session->close();
-        return;
-    }
+    auto existing = connections_.find(peerId);
+
+    if (existing == connections_.end()) {
+        connections_.emplace(peerId, session);
+    } else if (session->direction() == preferred &&
+               existing->second->direction() != preferred) {
+        auto oldSession = existing->second;
+        existing->second = session;
+        oldSession->close();
+               } else {
+                   session->close();
+                   return;
+               }
+
+    pendingConnections_.erase(pending);
 
     // Keep the existing connection if this peer is already registered.
     if (!connections_.emplace(peerId, session).second) {
