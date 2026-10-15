@@ -26,12 +26,14 @@ ConnectionManager::~ConnectionManager() {
     }
 }
 
-unsigned short ConnectionManager::establishListener() {
+unsigned short ConnectionManager::establishListener(bool enableDiscovery) {
     const auto port = listener_.establishListener(tcpPort_);
 
-    boost::asio::post(context_, [this] {
-        discovery_.start();
-    });
+    if (enableDiscovery) {
+        boost::asio::post(context_, [this] {
+            discovery_.start();
+        });
+    }
 
     return port;
 }
@@ -62,8 +64,8 @@ void ConnectionManager::addConnection(std::uint64_t connectionId, const std::str
     auto session = pending->second;
 
     const auto preferred = peerId > deviceId_
-    ? ConnectionSession::Direction::Incoming
-    : ConnectionSession::Direction::Outgoing;
+        ? ConnectionSession::Direction::Incoming
+        : ConnectionSession::Direction::Outgoing;
 
     auto existing = connections_.find(peerId);
 
@@ -74,15 +76,7 @@ void ConnectionManager::addConnection(std::uint64_t connectionId, const std::str
         auto oldSession = existing->second;
         existing->second = session;
         oldSession->close();
-               } else {
-                   session->close();
-                   return;
-               }
-
-    pendingConnections_.erase(pending);
-
-    // Keep the existing connection if this peer is already registered.
-    if (!connections_.emplace(peerId, session).second) {
+    } else {
         session->close();
         return;
     }

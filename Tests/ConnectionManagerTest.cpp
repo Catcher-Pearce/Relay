@@ -30,8 +30,8 @@ void verifyPair(const ConnectionManager::Snapshot& low, const ConnectionManager:
 
 void runPair(bool highStartsFirst) {
     ConnectionManager low(0, "peer-a"), high(0, "peer-z");
-    const auto lowPort = low.establishListener();
-    const auto highPort = high.establishListener();
+    const auto lowPort = low.establishListener(false);
+    const auto highPort = high.establishListener(false);
     auto connect = [&] {
         if (highStartsFirst) {
             high.sendConnectionRequest("127.0.0.1", lowPort);
@@ -65,8 +65,28 @@ void runPair(bool highStartsFirst) {
     }
 }
 
+void verifyOneSidedConnection() {
+    ConnectionManager low(0, "peer-a"), high(0, "peer-z");
+    low.establishListener(false);
+    const auto port = high.establishListener(false);
+    // This direction is nonpreferred, but must survive when it is the sole connection.
+    low.sendConnectionRequest("127.0.0.1", port);
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (snapshot(low).connections.empty() || snapshot(high).connections.empty()) {
+        require(std::chrono::steady_clock::now() < deadline, "Single connection was closed after Hello");
+        std::this_thread::sleep_for(10ms);
+    }
+    std::this_thread::sleep_for(100ms);
+    const auto a = snapshot(low), z = snapshot(high);
+    require(a.connections.size() == 1 && z.connections.size() == 1 &&
+            a.pendingCount == 0 && z.pendingCount == 0, "Single connection did not remain registered");
+    require(a.connections.front().remoteEndpoint == z.connections.front().localEndpoint,
+            "Peers did not retain the same connection");
+}
+
 int main() {
     try {
+        verifyOneSidedConnection();
         for (int i = 0; i < 6; ++i) runPair(i % 2 == 0);
         std::cout << "Both peers retained the same single connection; pending registries are empty.\n";
     } catch (const std::exception& error) {

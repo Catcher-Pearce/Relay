@@ -56,7 +56,8 @@ public:
      * @throws boost::system::system_error If listener setup fails.
      * @note Call once during startup before other listener operations can run.
      */
-    unsigned short establishListener();
+    // Discovery can be disabled for isolated localhost tests.
+    unsigned short establishListener(bool enableDiscovery = true);
 
     struct ConnectionInfo {
         std::string peerId;
@@ -109,10 +110,10 @@ private:
      * @param connectionId Local numeric ID used to find the pending session.
      * @param peerId Remote device ID extracted from the Hello payload.
      *
-     * The larger device ID keeps outgoing; the smaller keeps incoming.
-     * Sessions in the other direction are closed. Unknown pending IDs are ignored.
-     * If the peer ID is already registered, the
-     * new session is closed and the existing connection remains registered.
+     * The first identified connection is retained regardless of direction. For
+     * duplicates, the larger device ID prefers outgoing and the smaller incoming.
+     * A preferred new session replaces a nonpreferred existing session; other
+     * duplicates are closed. Unknown pending IDs are ignored.
      * @note Call only on the network thread through the session's Hello callback.
      */
     void addConnection(std::uint64_t connectionId, const std::string& peerId);
