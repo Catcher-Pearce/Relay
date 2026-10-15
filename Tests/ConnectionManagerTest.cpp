@@ -29,9 +29,9 @@ void verifyPair(const ConnectionManager::Snapshot& low, const ConnectionManager:
 }
 
 void runPair(bool highStartsFirst) {
-    ConnectionManager low("peer-a"), high("peer-z");
-    const auto lowPort = low.establishListener(0);
-    const auto highPort = high.establishListener(0);
+    ConnectionManager low(0, "peer-a"), high(0, "peer-z");
+    const auto lowPort = low.establishListener();
+    const auto highPort = high.establishListener();
     auto connect = [&] {
         if (highStartsFirst) {
             high.sendConnectionRequest("127.0.0.1", lowPort);

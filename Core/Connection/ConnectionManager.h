@@ -13,6 +13,7 @@
 #include <unordered_map>
 
 #include "ConnectionSession.h"
+#include "Discovery/DiscoveryManager.h"
 
 class ConnectionSession;
 
@@ -28,11 +29,12 @@ class ConnectionManager {
 public:
     /**
      * @brief Loads the local identity, initializes networking, and starts the worker.
+     * @param tcpPort Local TCP listening port, supplied by the application.
      * @param deviceId Explicit identity, or empty to load/create the persistent device ID.
      *
      * A work guard keeps the worker running even when there are no connections.
      */
-    explicit ConnectionManager(std::string deviceId = {});
+    explicit ConnectionManager(unsigned short tcpPort, std::string deviceId = {});
     /**
      * @brief Stops and joins the worker, then closes pending and registered sessions.
      * @note Destroy from outside the network worker, with no concurrent manager calls.
@@ -49,12 +51,12 @@ public:
 
     /**
      * @brief Starts accepting incoming IPv4 connections.
-     * @param port Local TCP port; defaults to 12345, and zero requests a free port.
+     * Uses the port supplied to the constructor; zero requests a free port.
      * @return Bound local port, including the assigned port when zero was requested.
      * @throws boost::system::system_error If listener setup fails.
      * @note Call once during startup before other listener operations can run.
      */
-    unsigned short establishListener(unsigned short port = 12345);
+    unsigned short establishListener();
 
     struct ConnectionInfo {
         std::string peerId;
@@ -73,12 +75,12 @@ public:
     /**
      * @brief Posts an outgoing connection request to the network worker.
      * @param address Numeric IPv4 or IPv6 address of the remote device.
-     * @param port Remote TCP port, defaulting to 12345.
+     * @param port Remote TCP listening port.
      *
      * Returns without waiting for a connection or Hello exchange. Address and
      * connection failures are logged by the sender.
      */
-    void sendConnectionRequest(const std::string& address, unsigned short port = 12345);
+    void sendConnectionRequest(const std::string& address, unsigned short port);
 
     /**
      * @brief Takes ownership of a connected socket and starts its Hello exchange.
@@ -115,10 +117,12 @@ private:
      */
     void addConnection(std::uint64_t connectionId, const std::string& peerId);
     const std::string deviceId_;
+    const unsigned short tcpPort_;
     boost::asio::io_context context_;
     // Keeps run() waiting even before any connections exist.
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_;
     std::unordered_map<std::string, std::shared_ptr<ConnectionSession>> connections_;
+    DiscoveryManager discovery_;
     std::unordered_map<std::uint64_t, std::shared_ptr<ConnectionSession>> pendingConnections_;
     std::uint64_t nextConnectionId_ = 1;
     ConnectionListener listener_;

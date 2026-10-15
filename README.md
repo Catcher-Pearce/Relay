@@ -20,7 +20,7 @@ Relay is a C++20 application for sharing files between computers over TCP. The c
 - `FileTransferComplete` and `FileTransferError` receive handlers. These message types are currently ignored by the dispatcher, even though the corresponding transfer methods exist.
 - Automatic chunk advancement from socket write completion (see TODOs below).
 - Automatic transfer cancellation and temporary-file cleanup when a session disconnects.
-- Peer discovery and reconnect tracking for each peer. The CLI retries only its startup address while there are no established or pending connections.
+- Discovery filtering for already connected/pending peers and reconnect tracking per peer.
 - Authentication, encryption, a GUI, transfer resume, and checksums.
 
 ## Build and run
@@ -32,19 +32,15 @@ cmake -S . -B cmake-build-debug
 cmake --build cmake-build-debug -j 2
 ```
 
-Every instance listens and initiates a connection:
-
-```text
-Relay PEER_IP [LOCAL_PORT [PEER_PORT]]
-```
-
-The local port defaults to `12345`. The peer port defaults to the local port. To connect two computers, run this on each with the other's LAN address:
+Start Relay without arguments on each computer:
 
 ```sh
-./cmake-build-debug/Relay OTHER_COMPUTER_IP
+./cmake-build-debug/Relay
 ```
 
-The listener remains active after a connection is established. Outgoing retries occur approximately once per second while all connection registries are empty.
+TCP port `12345` is defined once in `main` and passed to `ConnectionManager`, which stores it for the listener and discovery advertisement. Starting the listener also starts UDP discovery on port `12346`. Instances broadcast periodically and connect to discovered peers using their source IP and advertised TCP port.
+
+There is no command-line peer IP, startup TCP request, or manual retry loop. The listener and discovery remain active while the CLI accepts commands. Use `peers` to check discovered connections.
 
 ### CLI commands
 
@@ -59,25 +55,9 @@ The listener remains active after a connection is established. Outgoing retries 
 
 With exactly one connected peer, its ID can be omitted. With multiple peers, specify an ID from `peers`. The `files` command lists files; use `download "photos/my image.png"` to request one. Payload paths are UTF-8; use `/` separators.
 
-### Testing two local instances
+### Testing locally
 
-Use different working directories so the instances load different device IDs. In two terminals, replacing `/absolute/path/to/Relay` with the repository path:
-
-```sh
-# Terminal A
-mkdir -p /tmp/relay-a
-cd /tmp/relay-a
-/absolute/path/to/Relay/cmake-build-debug/Relay 127.0.0.1 12345 12346
-```
-
-```sh
-# Terminal B
-mkdir -p /tmp/relay-b
-cd /tmp/relay-b
-/absolute/path/to/Relay/cmake-build-debug/Relay 127.0.0.1 12346 12345
-```
-
-After connecting, try `peers`, `ping`, and `files`. Each peer should retain one connection to the other. Two instances running as the same OS user use the same default shared/download folders.
+The CLI listens on the fixed TCP port `12345`, so run it on two different computers for manual testing. For a same-machine test, use `ctest`: the connection test supplies port `0` to each manager to allocate distinct free ports and uses explicit peer identities. The existing connection test needs discovery isolation now that listener startup also starts discovery.
 
 ## Folders and listings
 

@@ -5,9 +5,10 @@
 
 #include "../Auth/DeviceIdentity.h"
 
-ConnectionManager::ConnectionManager(std::string deviceId)
+ConnectionManager::ConnectionManager(unsigned short tcpPort, std::string deviceId)
     : deviceId_(deviceId.empty() ? getOrCreateDeviceId() : std::move(deviceId)),
-      work_(boost::asio::make_work_guard(context_)),
+      tcpPort_(tcpPort), work_(boost::asio::make_work_guard(context_)),
+      discovery_(context_, *this, deviceId_, tcpPort_),
       listener_(context_, *this), sender_(context_, *this),
       worker_([this] { context_.run(); }) {}
 
@@ -25,9 +26,14 @@ ConnectionManager::~ConnectionManager() {
     }
 }
 
-unsigned short ConnectionManager::establishListener(unsigned short port) {
-    // Called once from main before it can initiate any other listener operation.
-    return listener_.establishListener(port);
+unsigned short ConnectionManager::establishListener() {
+    const auto port = listener_.establishListener(tcpPort_);
+
+    boost::asio::post(context_, [this] {
+        discovery_.start();
+    });
+
+    return port;
 }
 
 void ConnectionManager::sendConnectionRequest(const std::string& address, unsigned short port) {

@@ -9,6 +9,8 @@ find_package(Threads REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Core)
 
 add_library(RelayCore
+        Core/Connection/Discovery/DiscoveryManager.cpp
+        Core/Connection/Discovery/DiscoveryManager.h
         Core/FileShare/FolderManager.cpp
         Core/FileShare/FolderManager.h
         Core/Connection/ConnectionListener.cpp
