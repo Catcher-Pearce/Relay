@@ -44,6 +44,10 @@ void ConnectionManager::sendConnectionRequest(const std::string& address, unsign
     });
 }
 
+bool ConnectionManager::hasConnection(const std::string& peerId) const {
+    return connections_.contains(peerId);
+}
+
 std::shared_ptr<ConnectionSession>
 ConnectionManager::addPendingConnection(boost::asio::ip::tcp::socket socket, ConnectionSession::Direction direction) {
     const auto connectionId = nextConnectionId_++;

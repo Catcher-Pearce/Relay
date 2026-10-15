@@ -71,6 +71,9 @@ public:
     };
     // Read registries on the network worker; keep the manager alive until completion.
     std::future<Snapshot> snapshot();
+    // Network thread only, including discovery callbacks on the shared io_context.
+    // Checks established peers; pending sockets may not have identified themselves yet.
+    bool hasConnection(const std::string& peerId) const;
     // Queues a message on the network worker. False means the peer is disconnected.
     std::future<bool> sendMessage(const std::string& peerId, ConnectionSession::Message message);
     /**

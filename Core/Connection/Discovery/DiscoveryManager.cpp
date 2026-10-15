@@ -82,8 +82,11 @@ void DiscoveryManager::receive() {
                         !peerId.toString().contains(QChar::Null) &&
                         peerId.toString().toStdString() != deviceId_ &&
                         port >= 1 && port <= 65535) {
+                        if (!connectionManager_.hasConnection(peerId.toString().toStdString())) {
                         connectionManager_.sendConnectionRequest(
-                            senderEndpoint_.address().to_string(), static_cast<unsigned short>(port));
+                            senderEndpoint_.address().to_string(),
+                            static_cast<unsigned short>(port));
+                        }
                     }
                 }
             }
