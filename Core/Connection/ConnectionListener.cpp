@@ -15,6 +15,7 @@ unsigned short ConnectionListener::establishListener(unsigned short port) {
     acceptor_.set_option(tcp::acceptor::reuse_address(true));
     acceptor_.bind(endpoint);
     acceptor_.listen();
+    std::cout << "Listening on port " << acceptor_.local_endpoint().port() << std::endl;
     acceptNextConnection();
     return acceptor_.local_endpoint().port();
 }

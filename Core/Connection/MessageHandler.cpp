@@ -27,21 +27,17 @@ void handleHello(ConnectionSession& session, ConnectionSession::Message& message
 }
 
 void handleFileSystemRequest(ConnectionSession& session, ConnectionSession::Message& message) {
-    try {
-        FolderManager folders;
-        const auto json = folders.getFileSystem();
-        session.send({ConnectionSession::MessageType::FileSystemResponse,
-                      message.requestId, {json.begin(), json.end()}});
-    } catch (const std::exception& error) {
-        const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
-            .toJson(QJsonDocument::Compact);
-        session.send({ConnectionSession::MessageType::FileTransferError,
-                      message.requestId, {json.begin(), json.end()}});
-    }
+    FolderManager folders;
+    const auto json = folders.getFileSystem();
+
+    session.send({
+        ConnectionSession::MessageType::FileSystemResponse,
+        message.requestId,
+        {json.begin(), json.end()}
+    });
 }
 
-void handleFileSystemResponse(ConnectionSession& session, ConnectionSession::Message& message) {
-    session.notifyFileEvent(message);
+void handleFileSystemResponse(ConnectionSession&, ConnectionSession::Message& message) {
     std::cout << "Received file system response, request " << message.requestId << '\n'
               << std::string(message.payload.begin(), message.payload.end()) << std::endl;
 }
@@ -49,6 +45,7 @@ void handleFileSystemResponse(ConnectionSession& session, ConnectionSession::Mes
 void handleFileRequest(ConnectionSession& session, ConnectionSession::Message& message) {
     bool registered = false;
     try {
+        // FileRequest payload is a UTF-8 path relative to relay-shared.
         if (message.payload.empty() ||
             std::find(message.payload.begin(), message.payload.end(), 0) != message.payload.end()) {
             throw std::invalid_argument("File request must contain a nonempty path without null bytes");
@@ -66,8 +63,6 @@ void handleFileRequest(ConnectionSession& session, ConnectionSession::Message& m
         if (registered) session.removeFileTransfer(message.requestId);
         const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
             .toJson(QJsonDocument::Compact);
-        session.notifyFileEvent({ConnectionSession::MessageType::FileTransferError, message.requestId,
-                                 {json.begin(), json.end()}});
         session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
                       {json.begin(), json.end()}});
     }
@@ -107,8 +102,6 @@ void handleFileTransferStart(ConnectionSession& session, ConnectionSession::Mess
         if (registered) session.removeFileTransfer(message.requestId);
         const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
             .toJson(QJsonDocument::Compact);
-        session.notifyFileEvent({ConnectionSession::MessageType::FileTransferError, message.requestId,
-                                 {json.begin(), json.end()}});
         session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
                       {json.begin(), json.end()}});
     }
@@ -147,8 +140,6 @@ void handleFileChunk(ConnectionSession& session, const ConnectionSession::Messag
         }
         const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
             .toJson(QJsonDocument::Compact);
-        session.notifyFileEvent({ConnectionSession::MessageType::FileTransferError, message.requestId,
-                                 {json.begin(), json.end()}});
         session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
                       {json.begin(), json.end()}});
     }
@@ -166,7 +157,6 @@ void handleFileTransferComplete(ConnectionSession& session, const ConnectionSess
         session.removeFileTransfer(message.requestId);
         transfer = nullptr;
 
-        session.notifyFileEvent(message);
         std::cout << "Download finished, transfer " << message.requestId << std::endl;
     } catch (const std::exception& error) {
         if (transfer && transfer->state() == FileTransfer::State::Failed) {
@@ -179,8 +169,6 @@ void handleFileTransferComplete(ConnectionSession& session, const ConnectionSess
         }
         const auto json = QJsonDocument(QJsonObject{{"error", QString::fromUtf8(error.what())}})
             .toJson(QJsonDocument::Compact);
-        session.notifyFileEvent({ConnectionSession::MessageType::FileTransferError, message.requestId,
-                                 {json.begin(), json.end()}});
         session.send({ConnectionSession::MessageType::FileTransferError, message.requestId,
                       {json.begin(), json.end()}});
     }
@@ -204,12 +192,14 @@ void handleFileTransferError(ConnectionSession& session, const ConnectionSession
                   << ": " << error.toString().toStdString() << std::endl;
 
         if (auto* transfer = session.findFileTransfer(message.requestId)) {
+            // Never reply to an error with another error: that could cause a loop.
             transfer->cancel(false);
             session.removeFileTransfer(message.requestId);
         }
-        session.notifyFileEvent(message);
         // Unknown IDs can occur after local cleanup; logging the peer's error is enough.
     } catch (const std::exception& error) {
+        // Malformed messages leave transfers unchanged. If cleanup throws, retain
+        // the failed transfer and its temporary-file ownership so cleanup can be retried.
         std::cerr << "Could not handle error for transfer " << message.requestId
                   << ": " << error.what() << std::endl;
     }

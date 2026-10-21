@@ -80,6 +80,7 @@ void FileTransfer::sendNextChunk() {
             throw std::runtime_error("The transfer session is disconnected");
         }
         if (bytesTransferred_ == totalBytes_) {
+            // TODO: Call after the final chunk write completes, or immediately for an empty file.
             session->send({ConnectionSession::MessageType::FileTransferComplete, transferId_, {}});
             source_.close();
             state_ = State::Completed;
@@ -88,18 +89,19 @@ void FileTransfer::sendNextChunk() {
         const auto count = static_cast<std::size_t>(
             std::min<std::uint64_t>(ChunkSize, totalBytes_ - bytesTransferred_));
         // Chunk payload: 8-byte big-endian offset followed by raw file bytes.
+        // The frame's request ID is the transfer ID.
         std::vector<std::uint8_t> payload(8 + count);
         for (std::size_t i = 0; i < 8; ++i) {
             payload[i] = static_cast<std::uint8_t>(bytesTransferred_ >> (56 - 8 * i));
         }
-
         source_.read(reinterpret_cast<char*>(payload.data() + 8),
                      static_cast<std::streamsize>(count));
-
         if (source_.gcount() != static_cast<std::streamsize>(count) || source_.bad()) {
             throw std::runtime_error("Could not read the complete chunk; the file may have changed");
         }
-
+        // TODO: Attach a write-completion callback. Capture a weak session plus the
+        // transfer ID, look the transfer up again, verify it is still Sending, and
+        // call sendNextChunk(). Do not capture a raw FileTransfer pointer.
         session->send({ConnectionSession::MessageType::FileChunk, transferId_, std::move(payload)}, [id = transferId_](ConnectionSession& session) {
     auto* transfer = session.findFileTransfer(id);
     if (transfer && transfer->state() == State::Sending) {
@@ -280,6 +282,7 @@ void FileTransfer::cancel(bool notifyPeer) {
     source_.clear();
     destination_.clear();
     try {
+        // A rejected beginReceive must never delete somebody else's existing .part file.
         if (ownsTemporaryFile_) {
             std::filesystem::remove(temporaryPath_);
             ownsTemporaryFile_ = false;

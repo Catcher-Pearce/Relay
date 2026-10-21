@@ -4,21 +4,22 @@
 
 #include "DiscoveryManager.h"
 #include "../ConnectionManager.h"
-#include "Auth/DeviceIdentity.h"
 
 #include <boost/asio.hpp>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <qstring.h>
 #include <iostream>
+#include <utility>
 
 DiscoveryManager::DiscoveryManager(boost::asio::io_context& context,
                                    ConnectionManager& connectionManager,
-                                   const DeviceIdentity& identity,
+                                   std::string deviceId,
                                    unsigned short tcpPort)
     : socket_(context), timer_(context), receiveBuffer_{},
       broadcastEndpoint_(boost::asio::ip::address_v4::broadcast(), 12346),
-      identity_(identity), tcpPort_(tcpPort),
+      deviceId_(std::move(deviceId)), tcpPort_(tcpPort),
       connectionManager_(connectionManager) {}
 
 void DiscoveryManager::start() {
@@ -37,8 +38,7 @@ void DiscoveryManager::broadcast() {
     {"app", "relay"},
     {"version", 1},
     {"type", "discover"},
-    {"deviceId", QString::fromStdString(identity_.getDeviceId())},
-    {"deviceName", QString::fromStdString(identity_.getDeviceName())},
+    {"deviceId", QString::fromStdString(deviceId_)},
     {"tcpPort", static_cast<int>(tcpPort_)}
     }).toJson(QJsonDocument::Compact);
 
@@ -52,7 +52,6 @@ void DiscoveryManager::scheduleBroadcast() {
     timer_.async_wait([this](boost::system::error_code error) {
         if (error || stopped_) return;
 
-        connectionManager_.removeExpiredPeers();
         broadcast();
         scheduleBroadcast();
     });
@@ -74,7 +73,6 @@ void DiscoveryManager::receive() {
                     const auto message = document.object();
                     const auto type = message.value("type").toString();
                     const auto peerId = message.value("deviceId");
-                    const auto deviceName = message.value("deviceName");
                     const auto port = message.value("tcpPort").toInteger(-1);
 
                     if (message.value("app").toString() == "relay" &&
@@ -82,20 +80,12 @@ void DiscoveryManager::receive() {
                         (type == "discover") &&
                         peerId.isString() && !peerId.toString().isEmpty() &&
                         !peerId.toString().contains(QChar::Null) &&
-                        peerId.toString().toStdString() != identity_.getDeviceId() &&
+                        peerId.toString().toStdString() != deviceId_ &&
                         port >= 1 && port <= 65535) {
-                        // Refresh metadata even if this peer is already connected.
-                        connectionManager_.peerDiscovered(
-                            peerId.toString().toStdString(),
-                            deviceName.toString().toStdString(),
+                        if (!connectionManager_.hasConnection(peerId.toString().toStdString())) {
+                        connectionManager_.sendConnectionRequest(
                             senderEndpoint_.address().to_string(),
                             static_cast<unsigned short>(port));
-
-                        if (!connectionManager_.hasConnection(peerId.toString().toStdString()) &&
-                            identity_.getDeviceId() > peerId.toString().toStdString()) {
-                            connectionManager_.sendConnectionRequest(
-                                senderEndpoint_.address().to_string(),
-                                static_cast<unsigned short>(port));
                         }
                     }
                 }

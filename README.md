@@ -1,6 +1,6 @@
 # Relay
 
-Relay is a C++20 application for sharing files between computers over TCP. The CLI supports peer connections, Ping/Pong, directory listings, and downloads. A separate background core serves a Qt Widgets GUI with peer file trees and download controls.
+Relay is a C++20 application for sharing files between computers over TCP. The current CLI supports peer connections, Ping/Pong, and requesting a JSON directory listing. File-transfer methods and part of their message handling are implemented, but downloading a file through the application is not yet complete.
 
 ## Implemented
 
@@ -12,25 +12,20 @@ Relay is a C++20 application for sharing files between computers over TCP. The C
 - CLI commands for Ping, peer listing, and filesystem listing requests.
 - Home-folder creation and recursive JSON listings through `FolderManager`.
 - Session-owned file transfers, indexed by request ID.
-- File sending methods for metadata, 64 KiB chunks, and completion messages. Each successful chunk socket write automatically queues the next chunk.
+- File sending methods for metadata, 64 KiB chunks, and completion messages. The first chunk is queued automatically; subsequent chunks currently require manual advancement.
 - File receiving methods for temporary files, chunk validation, finalization, and cancellation.
 
 ### Not yet complete
 
+- `FileTransferComplete` and `FileTransferError` receive handlers. These message types are currently ignored by the dispatcher, even though the corresponding transfer methods exist.
+- Automatic chunk advancement from socket write completion (see TODOs below).
 - Automatic transfer cancellation and temporary-file cleanup when a session disconnects.
 - Discovery filtering for already connected/pending peers and reconnect tracking per peer.
-- Authentication, encryption, transfer resume, and checksums.
+- Authentication, encryption, a GUI, transfer resume, and checksums.
 
 ## Build and run
 
-Requires a C++20 compiler, CMake 3.20+, Boost headers 1.70+, Qt 6 Core and Network development files, OpenSSL 3 development files, and platform thread support. The desktop target also requires Qt 6 Widgets. Pass `-DRELAY_BUILD_GUI=OFF` to build the core and CLI without the desktop GUI.
-
-On Fedora, install the OpenSSL headers and link libraries with `sudo dnf install openssl-devel`.
-On Windows, install OpenSSL for your compiler/architecture and pass
-`-DOPENSSL_ROOT_DIR="path/to/openssl"` to CMake if it is not found automatically.
-`RelayCore` links `OpenSSL::Crypto` for key/certificate APIs and `OpenSSL::SSL` for TLS.
-This build dependency does not enable encryption on the existing TCP sessions;
-certificate trust and TLS socket handshakes still need implementing.
+Requires a C++20 compiler, CMake 3.20+, Boost headers 1.70+, Qt 6 Core development files, and platform thread support. No Qt GUI module is required.
 
 ```sh
 cmake -S . -B cmake-build-debug
@@ -46,56 +41,6 @@ Start Relay without arguments on each computer:
 TCP port `12345` is defined once in `main` and passed to `ConnectionManager`, which stores it for the listener and discovery advertisement. Starting the listener also starts UDP discovery on port `12346`. Instances broadcast periodically and connect to discovered peers using their source IP and advertised TCP port.
 
 There is no command-line peer IP, startup TCP request, or manual retry loop. The listener and discovery remain active while the CLI accepts commands. Use `peers` to check discovered connections.
-
-### Background core and Qt Widgets desktop application
-
-Run `./cmake-build-debug/RelayGui` or select `RelayGui` in CLion. The GUI
-attaches to the per-user `RelayDaemon`, starting it as a detached process when
-needed. Closing the window leaves discovery, connections, and downloads running.
-Reopen the GUI whenever needed; it restores current peers and recent download
-results from the core. Multiple GUI windows can attach to the same core.
-
-Click a connected peer to load its shared folder tree. Expand directories and
-use **Download** beside a regular file. Symlinks and other special entries have
-no download button. The Downloads table shows pending, completed, and failed
-requests, including errors such as an existing destination file. Downloads retain
-their relative folder structure under `HOME/relay/relay-downloads`. The GUI does
-not overwrite existing files. **Refresh files** requests a fresh peer listing.
-
-The core can also run without ever opening a GUI:
-
-```sh
-./cmake-build-debug/RelayDaemon --background
-./cmake-build-debug/RelayGui
-./cmake-build-debug/RelayDaemon --stop
-```
-
-Run `RelayDaemon` without `--background` to keep it in the foreground for debugging
-or a process supervisor. This does not install a login/startup service. The core
-continues until explicitly stopped, terminated, or the user session ends. Recent
-download history is held in memory while the core runs; it is not restored after
-a core restart. Resume and progress percentages are not implemented.
-
-The GUI uses a user-restricted local socket (Unix socket on Linux, named pipe on
-Windows); it owns no peer TCP sockets or file-transfer objects. It can reconnect
-when the core becomes available again. `RelayDaemon --help` describes optional
-`--data-dir`, `--socket`, `--port`, and `--no-discovery` settings. The GUI supports
-`--socket` and `--no-start-core` to attach to a specifically managed core.
-
-The daemon stores `deviceid.txt` and `devicename.txt` under Qt's per-user
-`AppLocalDataLocation` for Relay (`~/.local/share/Relay` on a default Linux setup).
-On its first launch from an existing Relay working directory, it copies existing
-identity files into that location. Subsequent launches use that stable location.
-`--data-dir` overrides it. The CLI still uses identity files in its working
-directory. Both use TCP port `12345` by default, so stop the CLI before starting
-the daemon on the same computer. The GUI's detached launch logs network/startup
-diagnostics to `daemon.log` in the data directory. Saving the device name updates
-subsequent discovery broadcasts without restarting the core.
-
-The GUI/core integration test uses a temporary home directory, a private control
-socket, a free TCP port, and a mock peer with discovery disabled. It verifies
-nested file browsing, binary downloads completed with no GUI open, restored
-results after reopening, and rejection of a duplicate daemon.
 
 ### CLI commands
 
@@ -133,37 +78,6 @@ Only `relay-shared` is listed and offered as a source for transfers. Downloads u
 ```
 
 Entries are sorted by relative path and include hidden files and empty directories. Paths use `/` separators. Types are `file`, `directory`, `symlink`, or `other`; only regular files have a `size` field, in bytes. Symbolic links are listed without following them. File contents are not embedded in this listing.
-
-## TLS credential files
-
-Before opening the listener, `main` calls `Authenticator::ensureCredentials()` with
-the persistent device ID. On first start it creates these PEM files:
-
-```text
-HOME/relay/tls/
-├── private-key.pem
-├── public-key.pem
-└── certificate.pem
-```
-
-The private key is EC P-256. The self-signed certificate uses SHA-256, is valid for
-one year, and includes client/server usage and a `urn:relay:device:...` URI SAN.
-The private key is unencrypted so Relay can start unattended. File creation uses
-atomic saves and a credentials-directory lock. POSIX permissions restrict the
-directory and private key to their owner; Windows relies on the user's directory
-ACLs in addition to Qt's file-permission support. These files stay outside the
-shared and download directories.
-
-Later starts validate and reuse existing files. Missing public-key or certificate
-files can be recreated from the existing private key. Missing private keys,
-corrupt/mismatched files, different device IDs, or expired certificates cause an
-error rather than silently replacing an identity. To renew an expired certificate,
-remove only `certificate.pem` after stopping Relay; the next start reuses the key.
-Changing `deviceid.txt` while retaining these files also causes an identity mismatch.
-
-This prepares credentials; the current TCP sockets still do not use TLS.
-Self-signed certificates need an explicit peer-trust/pinning scheme, and a device
-URI certificate is not a substitute for IP/DNS hostname verification.
 
 ## Message frame
 
@@ -212,7 +126,7 @@ Receiver                         Sender
    | <--- FileTransferComplete ---- |
 ```
 
-The sender queues metadata and the first chunk. After each chunk's `async_write` succeeds, its callback finds the session-owned transfer by ID and queues the next chunk. After the last chunk write, the next call queues completion. There are no application-level chunk acknowledgments. TCP handles reliable, ordered byte delivery. An empty file queues start and completion without data chunks.
+The sender currently queues metadata and the first chunk. The next chunk should be queued when the previous chunk's `async_write` finishes successfully; that callback is not implemented yet. Tests advance the sender manually. There are no application-level chunk acknowledgments. TCP handles reliable, ordered byte delivery. An empty file queues start and completion without data chunks.
 
 The offset in a FileChunk is its starting byte position, not its size. It remains in the protocol to validate sequential writes. Chunk size is the frame payload length minus eight bytes.
 
@@ -222,17 +136,17 @@ The receiving methods require sequential offsets and reject data exceeding the a
 
 `cancel()` closes streams, removes only its owned temporary file, and sends a transfer error if connected. Repeated cancellation and cancellation after completion do nothing. Destroying a transfer closes streams but does not remove its `.part` file. The sender's Completed state means completion was queued locally; there is no acknowledgment confirming that the receiver finalized its file.
 
-## Socket-write progression and remaining TODOs
+## TODO: Advance chunks after socket writes
 
 "Socket clear" means the queued frame's `async_write` has completed successfully. It does not mean the remote application saved the bytes, and the entire connection queue does not need to be empty. Use completion notifications rather than polling socket state.
 
 1. **Implemented: per-frame callbacks to `ConnectionSession::send()`.** Accept an optional completion callback and store it alongside the encoded frame. Ping and other callers can omit it.
 2. **Implemented: invoke callbacks in `writeNext()`.** Remove the completed frame, then notify its callback once. Handle callbacks that queue another frame without starting overlapping writes. Never advance a transfer after a write error or close; discard or fail outstanding callbacks.
-3. **Implemented: continue from the chunk callback.** In `FileTransfer::sendNextChunk()`, attach a callback capturing the transfer ID. The callback receives a `ConnectionSession&`; use it to find the transfer again and check Sending state before calling `sendNextChunk()`. Avoid capturing a raw transfer pointer because cancellation/removal can destroy it.
+3. **Continue from the chunk callback.** In `FileTransfer::sendNextChunk()`, attach a callback capturing the transfer ID. The callback receives a `ConnectionSession&`; use it to find the transfer again and check Sending state before calling `sendNextChunk()`. Avoid capturing a raw transfer pointer because cancellation/removal can destroy it.
 4. **Finish after the last chunk write.** Its callback calls `sendNextChunk()`, which queues FileTransferComplete. Remove the sender from the map after the completion frame's write finishes. Preserve metadata-before-chunk ordering and support empty files.
 5. **Bound outstanding file data.** Keep at most one queued/in-flight chunk per transfer; do not replace acknowledgments with a loop that queues the entire file. Add a connection-wide bound if many concurrent transfers are allowed.
 6. **Wire receiving and failure cleanup.** FileChunk handling is implemented. Add a FileTransferComplete handler calling `finishReceive()`. Handle FileTransferError and disconnects by cancelling and removing transfers. Catch errors inside completion callbacks so they cannot escape the network worker.
-7. **Extend callback tests.** Automatic multi-chunk progression and callbacks queueing additional writes are tested. Add explicit cancellation/disconnection tests while registered chunk callbacks are pending, and verify queue bounds across many transfers.
+7. **Test automatic advancement.** Verify a multi-chunk file completes without remote chunk acknowledgments, queued memory stays bounded, and cancellation/disconnection prevents callbacks from accessing removed transfers.
 
 A future final saved-file confirmation can be added if the sender needs to know the receiver successfully finalized the download. Local write completion alone does not provide that confirmation.
 
@@ -253,53 +167,18 @@ Networking callbacks, registries, sessions, and transfers belong to the single n
 
 Transfer handlers catch standard exceptions and send JSON errors. There is no overall exception boundary around the worker; an uncaught callback exception can terminate the application. Filesystem listing errors currently have no handler-level catch.
 
-## Tests
-
-The suite uses **Qt Test**, with fixtures, assertion failures that include source
-locations, and named data rows. CMake registers each test method separately with
-CTest so a failure identifies a specific behavior rather than a large test program.
-The Qt 6 Test development component is required when `BUILD_TESTING` is enabled.
-It is not required for a production-only build (`-DBUILD_TESTING=OFF`).
+## Automated tests
 
 ```sh
-cmake -S . -B cmake-build-debug -DBUILD_TESTING=ON
-cmake --build cmake-build-debug -j 2
-
-# Unit tests: no sockets or network permissions required.
-ctest --test-dir cmake-build-debug -L unit --output-on-failure
-
-# Integration tests: use localhost sockets on automatically allocated ports.
-ctest --test-dir cmake-build-debug -L integration --output-on-failure
-
-# All tests, or one named behavior.
 ctest --test-dir cmake-build-debug --output-on-failure
-ctest --test-dir cmake-build-debug -R prematureCompletion --output-on-failure
 ```
 
-| Location | Coverage |
+Tests require permission to open localhost sockets:
+
+| Test | Coverage |
 | --- | --- |
-| `Tests/Unit/AuthenticatorTest.cpp` | First-start credential generation, TLS-context loading, reuse, partial files, mismatches, expiry, and private-key permissions. |
-| `Tests/Unit/DeviceIdentityTest.cpp` | ID persistence, explicit IDs, persisted names, Unicode, and save failures. |
-| `Tests/Unit/FolderManagerTest.cpp` | Folder creation, listing content/order, hidden and Unicode files, symlinks, missing folders, and download exclusion. |
-| `Tests/Unit/FileTransferTest.cpp` | States, unsafe paths, collisions, chunk validation, finalization, cancellation, and disconnected sessions without opening sockets. |
-| `Tests/Unit/ConnectionSessionTest.cpp` | Transfer ownership and lookup, duplicate/null IDs, and close notification. |
-| `Tests/Integration/MessageHandlerTest.cpp` | Real session framing, malformed messages, binary receive/finalization, and peer-error cleanup. |
-| `Tests/Integration/SessionWriteTest.cpp` | Queued write ordering, callback behavior, cancelled transfers, and automatic binary/empty/multi-chunk sends. |
-| `Tests/Integration/ConnectionManagerTest.cpp` | One-sided connections, simultaneous connection selection, duplicate rejection/replacement, and disconnect cleanup. |
+| `simultaneous_connections` | Both peers initiate connections, retain the same one socket, reject duplicate connections, and empty pending registries. |
+| `folder_listing` | Directory creation, download exclusion, nested/hidden/Unicode entries, empty folders, symlinks, stable JSON, and missing-root errors. |
+| `file_transfer_send` | Binary sending/receiving methods, offsets, absence of chunk acknowledgment frames, metadata errors, session transfer maps, empty files, finalization, cancellation, collisions, and disconnect errors. |
 
-Each fixture uses a fresh temporary directory. Identity tests restore the working
-directory after each case; tests do not modify the user's device identity or home
-folders. Integration tests disable discovery and never broadcast onto the LAN.
-Network reads and CTest processes have timeouts. Symlink cases explicitly report
-skips when the OS does not permit creating symlinks.
-
-Run a Qt Test executable directly to select an individual data row, for example:
-
-```sh
-./cmake-build-debug/FileTransferTest 'unsafeDestination:parent-traversal'
-./cmake-build-debug/SessionWriteTest 'sendsFileAutomatically:multiple-chunks'
-```
-
-The older standalone C++ test programs and obsolete Python protocol scripts have
-been replaced by these suites. Discovery broadcasts and a full download between
-separate computers are not covered by these localhost tests.
+Transfer tests exercise methods and currently wired handlers; passing them does not imply a complete application-level download. The older root-level Python scripts target an earlier CLI/protocol and need updating before use.
