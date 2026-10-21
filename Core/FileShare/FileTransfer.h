@@ -17,9 +17,10 @@ class ConnectionSession;
  * transfer alive for every operation and call all methods on the network thread.
  * File reads, writes, and flushes are synchronous on that thread.
  *
- * Sending: sendFile() queues metadata and the first chunk. Automatic advancement
- * from socket write completion is a TODO; call sendNextChunk() manually until
- * that callback is implemented. Receiving: beginReceive() opens a .part file,
+ * Sending: sendFile() queues metadata and the first chunk. After each chunk's
+ * socket write succeeds, its callback finds the session-owned transfer by ID
+ * and calls sendNextChunk(). After the final chunk, it queues completion.
+ * Receiving: beginReceive() opens a .part file,
  * receiveChunk() appends each chunk, and finishReceive() renames the completed file.
  * This class does not parse frames. There are no application-level chunk acknowledgments.
  *
@@ -77,8 +78,9 @@ public:
      * @brief Queues one chunk, or completion if all source bytes were already queued.
      * @pre State is Sending. The previous chunk's socket write has completed.
      *
-     * TODO: Invoke from a per-frame write-completion callback, including after the
-     * final chunk. Until wired, callers advance manually. Do not call in an unbounded
+     * Invoked automatically by the previous chunk's write-completion callback,
+     * including after the final chunk. Do not call manually while that callback
+     * chain is active, or in an unbounded
      * loop because send() queues bytes in memory. Completion means queued locally;
      * it does not confirm that the receiver has finalized its file.
      * @throws std::logic_error If no outgoing transfer is active.

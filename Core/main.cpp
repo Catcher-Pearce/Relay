@@ -1,10 +1,13 @@
 #include "Connection/ConnectionManager.h"
+#include "Auth/DeviceIdentity.h"
+#include "FileShare/FolderManager.h"
 #include <exception>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <QCoreApplication>
 
 namespace {
 void commandLoop(ConnectionManager& manager) {
@@ -68,10 +71,13 @@ void commandLoop(ConnectionManager& manager) {
 }
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    QCoreApplication application(argc, argv);
     try {
         constexpr unsigned short tcpPort = 12345;
-        ConnectionManager manager(tcpPort);
+        DeviceIdentity identity;
+        FolderManager folders;
+        ConnectionManager manager(tcpPort, identity.getDeviceId());
         manager.establishListener();
         commandLoop(manager);
     } catch (const std::exception& error) {

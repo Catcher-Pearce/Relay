@@ -58,6 +58,11 @@ public:
         std::vector<std::uint8_t> payload;
     };
 
+    // Install and invoke on the network thread. Reports listing and download results.
+    std::function<void(const Message&)> onFileEvent;
+    void notifyFileEvent(const Message& message) { if (onFileEvent) onFileEvent(message); }
+    const std::string& peerId() const { return peerId_; }
+
     struct PendingWrite {
         std::shared_ptr<std::vector<std::uint8_t>> frame;
         std::function<void(ConnectionSession&)> onWritten;

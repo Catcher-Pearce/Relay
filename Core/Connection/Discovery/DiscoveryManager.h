@@ -5,20 +5,21 @@
 #ifndef RELAY_DISCOVERYMANAGER_H
 #define RELAY_DISCOVERYMANAGER_H
 #include <array>
-#include <string>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/ip/udp.hpp>
 
 class ConnectionManager;
+class DeviceIdentity;
 
 class DiscoveryManager {
 
 public:
     // Initializes resources on the shared network context. Does not start discovery.
-    // connectionManager must outlive this object and its asynchronous operations.
+    // connectionManager and identity must outlive this object and its asynchronous operations.
+    // Read/update the identity on the shared network thread while discovery runs.
     DiscoveryManager(boost::asio::io_context& context,
                      ConnectionManager& connectionManager,
-                     std::string deviceId,
+                     const DeviceIdentity& identity,
                      unsigned short tcpPort);
 
     void start();
@@ -37,7 +38,7 @@ private:
     boost::asio::ip::udp::endpoint senderEndpoint_;
     boost::asio::ip::udp::endpoint broadcastEndpoint_;
 
-    std::string deviceId_;
+    const DeviceIdentity& identity_;
     unsigned short tcpPort_;
 
     ConnectionManager& connectionManager_;

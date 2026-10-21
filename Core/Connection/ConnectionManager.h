@@ -1,10 +1,12 @@
 #pragma once
 
 #include "ConnectionListener.h"
+#include "Auth/DeviceIdentity.h"
 #include "ConnectionSender.h"
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <cstdint>
+#include <chrono>
 #include <memory>
 #include <future>
 #include <vector>
@@ -71,6 +73,20 @@ public:
     };
     // Read registries on the network worker; keep the manager alive until completion.
     std::future<Snapshot> snapshot();
+
+    // Callback runs on the network worker; marshal UI work onto the GUI thread.
+    using FileEventHandler = std::function<void(const std::string&, const ConnectionSession::Message&)>;
+    void setFileEventHandler(FileEventHandler handler);
+    void reloadDeviceName();
+
+    struct PeerInfo {
+        std::string deviceName;
+        std::string address;
+        unsigned short tcpPort = 0; // Unknown until advertised by discovery.
+        std::chrono::steady_clock::time_point lastSeen = std::chrono::steady_clock::now();
+        bool connected = false;
+    };
+
     // Network thread only, including discovery callbacks on the shared io_context.
     // Checks established peers; pending sockets may not have identified themselves yet.
     bool hasConnection(const std::string& peerId) const;
@@ -107,6 +123,11 @@ public:
      */
     void removeConnection(std::uint64_t connectionId);
 
+    void peerDiscovered(const std::string& peerId, std::string deviceName, const std::string& address, unsigned short tcpPort);
+    // Network thread only. Keep active TCP peers even when announcements stop.
+    // Called every discovery interval; a peer expires after more than 20 seconds of silence.
+    void removeExpiredPeers();
+
 private:
     /**
      * @brief Promotes a pending session after its Hello callback supplies a peer ID.
@@ -120,12 +141,14 @@ private:
      * @note Call only on the network thread through the session's Hello callback.
      */
     void addConnection(std::uint64_t connectionId, const std::string& peerId);
-    const std::string deviceId_;
+    FileEventHandler fileEventHandler_;
+    DeviceIdentity identity_;
     const unsigned short tcpPort_;
     boost::asio::io_context context_;
     // Keeps run() waiting even before any connections exist.
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_;
     std::unordered_map<std::string, std::shared_ptr<ConnectionSession>> connections_;
+    std::unordered_map<std::string, PeerInfo> peers_;
     DiscoveryManager discovery_;
     std::unordered_map<std::uint64_t, std::shared_ptr<ConnectionSession>> pendingConnections_;
     std::uint64_t nextConnectionId_ = 1;
